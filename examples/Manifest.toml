@@ -14,6 +14,11 @@ uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
 [[deps.Base64]]
 uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 
+[[deps.BufferedStreams]]
+git-tree-sha1 = "bb065b14d7f941b8617bc323063dbe79f55d16ea"
+uuid = "e1450e63-4bb3-523b-b2a4-4ffa8c0fd77d"
+version = "1.1.0"
+
 [[deps.CEnum]]
 git-tree-sha1 = "eb4cb44a499229b3b8426dcfb5dd85333951ff90"
 uuid = "fa961155-64e5-5f13-b03f-caf6b980ea82"
@@ -229,7 +234,7 @@ uuid = "4fa426e6-03fd-45b2-b2dd-25f726820c03"
 version = "0.4.1"
 
 [[deps.SoapySDRRecorder]]
-deps = ["SigMF", "SoapySDR", "TimerOutputs", "Unitful"]
+deps = ["BufferedStreams", "SigMF", "SoapySDR", "TimerOutputs", "Unitful"]
 path = ".."
 uuid = "963dc442-cee5-48d9-b294-055e8ed6afd4"
 version = "0.1.0"

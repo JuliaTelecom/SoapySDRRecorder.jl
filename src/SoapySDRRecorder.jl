@@ -4,14 +4,24 @@ using SoapySDR
 using SigMF
 using TimerOutputs
 using Unitful
-
+using BufferedStreams
 
 get_time_ms() = trunc(Int, time() * 1000)
 
-function record(output_file ;direct_buffer_access = false, timer_display = true,
+"""
+    record(output_file; direct_buffer_access = false, timer_display = true,
+           device::Union{Nothing, SoapySDR.Device}=nothing, #XXX: Make this KWargs
+           channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
+           channel_configuration::Union{Nothing, Function}=nothing)
+
+Record data from a SDR device to a file or IOBuffer.
+"""
+function record(output::Union{IO, AbstractString};
+                direct_buffer_access = false, timer_display = true,
                 device::Union{Nothing, SoapySDR.Device}=nothing, #XXX: Make this KWargs
                 channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
                 channel_configuration::Union{Nothing, Function}=nothing)
+
     # open the first device
     device = if device === nothing
         devices = SoapySDR.Devices()
@@ -28,21 +38,14 @@ function record(output_file ;direct_buffer_access = false, timer_display = true,
     else
         channels
     end
+    num_channels = length(channels)
 
-    rx1 = device.rx[1]
-
-    sampRate = 2.048e6
-
-    rx1.sample_rate = sampRate * u"Hz"
-
-    # Enable automatic Gain Control
-    rx1.gain_mode = true
+    # run the channel configuration function
+    if channel_configuration !== nothing
+        channel_configuration(device, channels)
+    end
 
     to = TimerOutput()
-
-    f0 = 104.1e6
-
-    rx1.frequency = f0 * u"Hz"
 
     # set up a stream (complex floats)
     format = first(channels).native_stream_format
@@ -52,11 +55,15 @@ function record(output_file ;direct_buffer_access = false, timer_display = true,
     buffsz = rxStream.mtu
     buff = Array{format}(undef, buffsz)
     buffs = Ptr{format}[C_NULL] # pointer for direct buffer API
+    # Allocate some buffers
+    # concurrent ring buffer?
+    num_buffers = 16 
+    buffers = [ntuple(_ -> Vector{format}(undef, buffsz), num_channels) for _ in 1:num_buffers]
 
     last_timeoutput = get_time_ms()
 
     # compute timeout based on sample_rate
-    timeout_estimate = buffsz/rx1.sample_rate*2
+    timeout_estimate = buffsz/first(channels).sample_rate*2
 
     # assert some properties
     # all sample rates should be the same
@@ -64,7 +71,11 @@ function record(output_file ;direct_buffer_access = false, timer_display = true,
 
     @show timeout_estimate
 
-    io = open(output_file, "w")
+    io = BufferedOutputStream(if output isa AbstractString
+        open(output, "w")
+    elseif output isa IO
+        output
+    end)
 
     # If there is timing slack, we can sleep a bit to run event handlers
     have_slack = true
@@ -75,7 +86,7 @@ function record(output_file ;direct_buffer_access = false, timer_display = true,
         while true
             @timeit to "Reading stream" begin
                 if !direct_buffer_access
-                    read!(rxStream, (buff,), timeout=timeout_estimate)
+                    read!(rxStream, buffers[1], timeout=timeout_estimate)
                 else
                     err, handle, flags, timeNs =
                         SoapySDR.SoapySDRDevice_acquireReadBuffer(device, rxStream, buffs, timeout_estimate)
@@ -93,7 +104,13 @@ function record(output_file ;direct_buffer_access = false, timer_display = true,
                 end
             end
             @timeit to "Write to file" begin
-                write(io, buff)
+                # eventually we will zip multiple concurrent streams for SDRs together here.
+                # this shoudl be fast...
+                for elts in zip(buffers[1]...)
+                    for sample in elts
+                        write(io, sample)
+                    end
+                end
             end
             if have_slack && timer_display
                 @timeit to "Timer Display" begin
@@ -110,43 +127,5 @@ function record(output_file ;direct_buffer_access = false, timer_display = true,
     end
 end
 
-
-function record1(output_file
-                ;device::Union{SoapySDR.Device,Nothing}=nothing,
-                channels::Union{AbstractArray{<:SoapySDR.Channel},Nothing}=nothing,
-                )
-    num_channels = if channels === nothing
-        length(device.rx)
-    else
-        length(channels)
-    end
-
-
-
-    # here we are reach a type instability, so we need to function barrier this part    
-    format = device.rx[first(channels)].native_stream_format
-
-    stream = SoapySDR.Stream(channels)
-    mtu = stream.mtu
-
-    # Allocate some buffers
-    buffers = [ntuple(_ -> Vector(format, mtu), num_channels) for _ in 1:num_buffers]
-
-    to = TimerOutput()
-
-    # compute timeout
-
-    #TODO: avoid closure construction
-    SoapySDR.activate!(stream) do
-        open(output_file, "w") do io
-            while true
-                # read a buffer
-                @timeit to "SDR Read" SoapySDR.read!(rx_stream, buffers[1])
-                # write the buffer to the file
-                @timeit to "File Write" write(io, buffer[1])
-            end
-        end
-    end
-end
 
 end

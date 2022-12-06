@@ -4,6 +4,7 @@ authors = ["Steve Kelly <kd2cca@gmail.com> and contributors"]
 version = "0.1.0"
 
 [deps]
+BufferedStreams = "e1450e63-4bb3-523b-b2a4-4ffa8c0fd77d"
 SigMF = "dc1af1da-aa00-46a0-b3ad-5cde4383c966"
 SoapySDR = "4fa426e6-03fd-45b2-b2dd-25f726820c03"
 TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
