@@ -229,7 +229,7 @@ uuid = "4fa426e6-03fd-45b2-b2dd-25f726820c03"
 version = "0.4.1"
 
 [[deps.SoapySDRRecorder]]
-deps = ["SigMF", "SoapySDR", "TimerOutputs"]
+deps = ["SigMF", "SoapySDR", "TimerOutputs", "Unitful"]
 path = ".."
 uuid = "963dc442-cee5-48d9-b294-055e8ed6afd4"
 version = "0.1.0"

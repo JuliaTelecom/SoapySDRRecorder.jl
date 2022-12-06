@@ -7,6 +7,7 @@ version = "0.1.0"
 SigMF = "dc1af1da-aa00-46a0-b3ad-5cde4383c966"
 SoapySDR = "4fa426e6-03fd-45b2-b2dd-25f726820c03"
 TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
+Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [compat]
 julia = "1"

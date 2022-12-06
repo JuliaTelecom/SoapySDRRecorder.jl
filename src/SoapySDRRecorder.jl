@@ -3,16 +3,33 @@ module SoapySDRRecorder
 using SoapySDR
 using SigMF
 using TimerOutputs
+using Unitful
 
 
 get_time_ms() = trunc(Int, time() * 1000)
 
-function record(output_file ;direct_buffer_access = true, timer_display = true)
-    devs = Devices()
+function record(output_file ;direct_buffer_access = false, timer_display = true,
+                device::Union{Nothing, SoapySDR.Device}=nothing, #XXX: Make this KWargs
+                channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
+                channel_configuration::Union{Nothing, Function}=nothing)
+    # open the first device
+    device = if device === nothing
+        devices = SoapySDR.Devices()
+        if length(devices) == 0
+            error("No devices found")
+        else
+            @info "No device specified, selecting first device available"
+            device = Device(devices[1])
+        end
+    end
 
-    sdr = Device(devs[1])
+    channels = if channels === nothing
+        device.rx
+    else
+        channels
+    end
 
-    rx1 = sdr.rx[1]
+    rx1 = device.rx[1]
 
     sampRate = 2.048e6
 
@@ -28,8 +45,8 @@ function record(output_file ;direct_buffer_access = true, timer_display = true)
     rx1.frequency = f0 * u"Hz"
 
     # set up a stream (complex floats)
-    format = rx1.native_stream_format
-    rxStream = SoapySDR.Stream(format, [rx1])
+    format = first(channels).native_stream_format
+    rxStream = SoapySDR.Stream(format, channels)
 
     # create a re-usable buffer for rx samples
     buffsz = rxStream.mtu
@@ -38,6 +55,15 @@ function record(output_file ;direct_buffer_access = true, timer_display = true)
 
     last_timeoutput = get_time_ms()
 
+    # compute timeout based on sample_rate
+    timeout_estimate = buffsz/rx1.sample_rate*2
+
+    # assert some properties
+    # all sample rates should be the same
+    @assert all(c -> c.sample_rate == first(channels).sample_rate, channels)
+
+    @show timeout_estimate
+
     io = open(output_file, "w")
 
     # If there is timing slack, we can sleep a bit to run event handlers
@@ -45,40 +71,41 @@ function record(output_file ;direct_buffer_access = true, timer_display = true)
 
     # Enable ther stream
     @info "streaming..."
-    SoapySDR.activate!(rxStream)
-    while true
-        @timeit to "Reading stream" begin
-            if !direct_buffer_access
-                read!(rxStream, (buff,))
-            else
-                err, handle, flags, timeNs =
-                    SoapySDR.SoapySDRDevice_acquireReadBuffer(sdr, rxStream, buffs, 0)
-                if err == SoapySDR.SOAPY_SDR_TIMEOUT
-                    have_slack = true
-                    continue # we don't have any data available yet, so loop
-                elseif err == SoapySDR.SOAPY_SDR_OVERFLOW
-                    have_slack = false
-                    err = buffsz # nothing to do, should be the MTU
-                end
-                @assert err > 0
-                buff = unsafe_wrap(Array{format}, buffs[1], (buffsz,))
-                #XXX: We probably should return after we finish the write to file
-                SoapySDR.SoapySDRDevice_releaseReadBuffer(sdr, rxStream, handle)
-            end
-        end
-        @timeit to "Write to file" begin
-            write(io, buff)
-        end
-        if have_slack && timer_display
-            @timeit to "Timer Display" begin
-                if get_time_ms() - last_timeoutput > 3000
-                    show(to)
-                    last_timeoutput = get_time_ms()
+    SoapySDR.activate!(rxStream) do
+        while true
+            @timeit to "Reading stream" begin
+                if !direct_buffer_access
+                    read!(rxStream, (buff,), timeout=timeout_estimate)
+                else
+                    err, handle, flags, timeNs =
+                        SoapySDR.SoapySDRDevice_acquireReadBuffer(device, rxStream, buffs, timeout_estimate)
+                    if err == SoapySDR.SOAPY_SDR_TIMEOUT
+                        have_slack = true
+                        continue # we don't have any data available yet, so loop
+                    elseif err == SoapySDR.SOAPY_SDR_OVERFLOW
+                        have_slack = false
+                        err = buffsz # nothing to do, should be the MTU
+                    end
+                    @assert err > 0
+                    buff = unsafe_wrap(Array{format}, buffs[1], (buffsz,))
+                    #XXX: We probably should return after we finish the write to file
+                    SoapySDR.SoapySDRDevice_releaseReadBuffer(device, rxStream, handle)
                 end
             end
-        end
-        @timeit to "GC" begin
-            have_slack && GC.gc(false)
+            @timeit to "Write to file" begin
+                write(io, buff)
+            end
+            if have_slack && timer_display
+                @timeit to "Timer Display" begin
+                    if get_time_ms() - last_timeoutput > 3000
+                        show(to)
+                        last_timeoutput = get_time_ms()
+                    end
+                end
+            end
+            @timeit to "GC" begin
+                have_slack && GC.gc(false)
+            end
         end
     end
 end
@@ -88,28 +115,13 @@ function record1(output_file
                 ;device::Union{SoapySDR.Device,Nothing}=nothing,
                 channels::Union{AbstractArray{<:SoapySDR.Channel},Nothing}=nothing,
                 )
-    # open the first device
-    device = if device === nothing
-        devices = SoapySDR.Devices()
-        if length(devices) == 0
-            error("No devices found")
-        else
-            @info "No device specified, selecting first device available"
-            device = Device(devices[1])
-        end
-    end
-
     num_channels = if channels === nothing
         length(device.rx)
     else
         length(channels)
     end
 
-    channels = if channels === nothing
-        device.rx
-    else
-        channels
-    end
+
 
     # here we are reach a type instability, so we need to function barrier this part    
     format = device.rx[first(channels)].native_stream_format
