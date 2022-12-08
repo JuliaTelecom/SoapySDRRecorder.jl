@@ -2,10 +2,10 @@ module SoapySDRRecorder
 
 using SoapySDR
 using SigMF
-using TimerOutputs
 using Unitful
 using BufferedStreams
 
+gc_bytes() = Base.gc_bytes()
 get_time_ms() = trunc(Int, time() * 1000)
 
 """
@@ -45,10 +45,8 @@ function record(output::Union{IO, AbstractString};
         channel_configuration(device, channels)
     end
 
-    to = TimerOutput()
-
     # set up a stream (complex floats)
-    format = first(channels).native_stream_format
+    format = Complex{Int16} #first(channels).native_stream_format
     rxStream = SoapySDR.Stream(format, channels)
 
     # create a re-usable buffer for rx samples
@@ -80,11 +78,19 @@ function record(output::Union{IO, AbstractString};
     # If there is timing slack, we can sleep a bit to run event handlers
     have_slack = true
 
+    timers = [0,0,0]
+    allocations = [0,0,0]
+    temp_bytes = 0
+    temp_time = 0
+
     # Enable ther stream
     @info "streaming..."
-    SoapySDR.activate!(rxStream) do
+    SoapySDR.activate!(rxStream)
+    try
         while true
-            @timeit to "Reading stream" begin
+            begin
+                temp_bytes = Base.gc_bytes()
+                temp_time = get_time_ms()
                 if !direct_buffer_access
                     read!(rxStream, buffers[1], timeout=timeout_estimate)
                 else
@@ -102,8 +108,12 @@ function record(output::Union{IO, AbstractString};
                     #XXX: We probably should return after we finish the write to file
                     SoapySDR.SoapySDRDevice_releaseReadBuffer(device, rxStream, handle)
                 end
+                allocations[1] += Base.gc_bytes() - temp_bytes
+                timers[1] = get_time_ms() - temp_time
             end
-            @timeit to "Write to file" begin
+            begin
+                temp_bytes = Base.gc_bytes()
+                temp_time = get_time_ms()
                 # eventually we will zip multiple concurrent streams for SDRs together here.
                 # this shoudl be fast...
                 for elts in zip(buffers[1]...)
@@ -111,19 +121,32 @@ function record(output::Union{IO, AbstractString};
                         write(io, sample)
                     end
                 end
+                allocations[2] += Base.gc_bytes() - temp_bytes
+                timers[2] = get_time_ms() - temp_time
             end
             if have_slack && timer_display
-                @timeit to "Timer Display" begin
-                    if get_time_ms() - last_timeoutput > 3000
-                        show(to)
+                temp_bytes = Base.gc_bytes()
+                temp_time = get_time_ms()
+                begin
+                    if get_time_ms() - last_timeoutput > 1000
+                        # some hackery to not allocate on the Julia GC so we use libc printf
+                        @ccall printf("Read Stream: %ld allocations: %ld \n"::Cstring, timers[1]::Int, allocations[1]::Int)::Cint
+                        @ccall printf("Write File: %ld allocations: %ld \n"::Cstring, timers[2]::Int, allocations[2]::Int)::Cint
+                        @ccall printf("Telemetry: %ld allocations: %ld \n"::Cstring, timers[3]::Int, allocations[3]::Int)::Cint
+                        @ccall _flushlbf()::Cvoid
                         last_timeoutput = get_time_ms()
                     end
                 end
+                allocations[3] += Base.gc_bytes() - temp_bytes
+                timers[3] = get_time_ms() - temp_time
             end
-            @timeit to "GC" begin
+            begin
                 have_slack && GC.gc(false)
             end
         end
+    finally
+        SoapySDR.deactivate!(rxStream)
+        close(io)
     end
 end
 
