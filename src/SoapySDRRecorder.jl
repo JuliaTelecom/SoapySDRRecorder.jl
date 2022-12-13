@@ -16,7 +16,7 @@ get_time_ms() = trunc(Int, time() * 1000)
 
 Record data from a SDR device to a file or IOBuffer.
 """
-function record(output::Union{IO, AbstractString};
+function record(output::AbstractString;
                 direct_buffer_access = false, timer_display = true,
                 device::Union{Nothing, SoapySDR.Device}=nothing, #XXX: Make this KWargs
                 channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
@@ -38,7 +38,8 @@ function record(output::Union{IO, AbstractString};
     else
         channels
     end
-    num_channels = length(channels)
+    num_channels = 1
+    #num_channels = length(channels)
 
     # run the channel configuration function
     if channel_configuration !== nothing
@@ -56,7 +57,7 @@ function record(output::Union{IO, AbstractString};
     # Allocate some buffers
     # concurrent ring buffer?
     num_buffers = 16 
-    buffers = [ntuple(_ -> Vector{format}(undef, buffsz), num_channels) for _ in 1:num_buffers]
+    buffers = NTuple{num_channels, Vector{format}}[ntuple(_ -> Vector{format}(undef, buffsz), num_channels) for _ in 1:num_buffers]
 
     last_timeoutput = get_time_ms()
 
@@ -69,11 +70,7 @@ function record(output::Union{IO, AbstractString};
 
     @show timeout_estimate
 
-    io = BufferedOutputStream(if output isa AbstractString
-        open(output, "w")
-    elseif output isa IO
-        output
-    end)
+    io = @ccall open(output::Cstring, 1::Cint)::Cint
 
     # If there is timing slack, we can sleep a bit to run event handlers
     have_slack = true
@@ -82,6 +79,8 @@ function record(output::Union{IO, AbstractString};
     allocations = [0,0,0]
     temp_bytes = 0
     temp_time = 0
+
+    handle = 0 # TODO match type to C return
 
     # Enable ther stream
     @info "streaming..."
@@ -104,9 +103,7 @@ function record(output::Union{IO, AbstractString};
                         err = buffsz # nothing to do, should be the MTU
                     end
                     @assert err > 0
-                    buff = unsafe_wrap(Array{format}, buffs[1], (buffsz,))
-                    #XXX: We probably should return after we finish the write to file
-                    SoapySDR.SoapySDRDevice_releaseReadBuffer(device, rxStream, handle)
+                    buffers[1] = unsafe_wrap(Array{format}, buffs[1], (buffsz,))
                 end
                 allocations[1] += Base.gc_bytes() - temp_bytes
                 timers[1] = get_time_ms() - temp_time
@@ -116,14 +113,17 @@ function record(output::Union{IO, AbstractString};
                 temp_time = get_time_ms()
                 # eventually we will zip multiple concurrent streams for SDRs together here.
                 # this shoudl be fast...
-                for elts in zip(buffers[1]...)
-                    for sample in elts
-                        write(io, sample)
+                for sample_ind in eachindex(first(buffers[1]))
+                    for chan_ind in 1:num_channels
+                        sample = buffers[1][chan_ind][sample_ind]
+                        @ccall write(io::Cint, pointer_from_objref(Ref(sample))::Ptr{Cchar}, sizeof(format)::Cint, 0::Cint)::Cint
                     end
                 end
                 allocations[2] += Base.gc_bytes() - temp_bytes
                 timers[2] = get_time_ms() - temp_time
             end
+            SoapySDR.SoapySDRDevice_releaseReadBuffer(device, rxStream, handle)
+
             if have_slack && timer_display
                 temp_bytes = Base.gc_bytes()
                 temp_time = get_time_ms()
@@ -146,7 +146,7 @@ function record(output::Union{IO, AbstractString};
         end
     finally
         SoapySDR.deactivate!(rxStream)
-        close(io)
+        @ccall close(io::Cint)::Cint
     end
 end
 
