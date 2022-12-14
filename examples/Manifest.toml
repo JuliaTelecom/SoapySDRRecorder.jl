@@ -229,12 +229,12 @@ version = "0.3.3+0"
 
 [[deps.SoapySDR]]
 deps = ["CEnum", "Intervals", "Unitful", "soapysdr_jll"]
-git-tree-sha1 = "7c19fdc0ccdd6aa1df3efe55f85fab54d10cc9d6"
+path = "/home/sjkelly/.julia/dev/SoapySDR"
 uuid = "4fa426e6-03fd-45b2-b2dd-25f726820c03"
 version = "0.4.1"
 
 [[deps.SoapySDRRecorder]]
-deps = ["BufferedStreams", "SigMF", "SoapySDR", "TimerOutputs", "Unitful"]
+deps = ["BufferedStreams", "SigMF", "SoapySDR", "Unitful"]
 path = ".."
 uuid = "963dc442-cee5-48d9-b294-055e8ed6afd4"
 version = "0.1.0"
@@ -263,12 +263,6 @@ deps = ["Dates", "Downloads", "InlineStrings", "LazyArtifacts", "Mocking", "Prin
 git-tree-sha1 = "a92ec4466fc6e3dd704e2668b5e7f24add36d242"
 uuid = "f269a46b-ccf7-5d73-abea-4c690281aa53"
 version = "1.9.1"
-
-[[deps.TimerOutputs]]
-deps = ["ExprTools", "Printf"]
-path = "/home/sjkelly/.julia/dev/TimerOutputs"
-uuid = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
-version = "0.5.22"
 
 [[deps.UUIDs]]
 deps = ["Random", "SHA"]

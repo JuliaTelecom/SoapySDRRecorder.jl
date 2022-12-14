@@ -57,8 +57,9 @@ function record(output::AbstractString;
     # Allocate some buffers
     # concurrent ring buffer?
     num_buffers = 16 
-    buffers = NTuple{num_channels, Vector{format}}[ntuple(_ -> Vector{format}(undef, buffsz), num_channels) for _ in 1:num_buffers]
+    buffers = [Vector{Complex{Int16}}(undef, buffsz) for _ in 1:num_channels]
 
+    @show typeof(buffers)
     last_timeoutput = get_time_ms()
 
     # compute timeout based on sample_rate
@@ -91,7 +92,7 @@ function record(output::AbstractString;
                 temp_bytes = Base.gc_bytes()
                 temp_time = get_time_ms()
                 if !direct_buffer_access
-                    read!(rxStream, buffers[1], timeout=timeout_estimate)
+                    read!(rxStream, buffers, timeout=timeout_estimate)
                 else
                     err, handle, flags, timeNs =
                         SoapySDR.SoapySDRDevice_acquireReadBuffer(device, rxStream, buffs, timeout_estimate)
@@ -103,7 +104,7 @@ function record(output::AbstractString;
                         err = buffsz # nothing to do, should be the MTU
                     end
                     @assert err > 0
-                    buffers[1] = unsafe_wrap(Array{format}, buffs[1], (buffsz,))
+                    buffers = unsafe_wrap(Array{format}, buffs[1], (buffsz,))
                 end
                 allocations[1] += Base.gc_bytes() - temp_bytes
                 timers[1] = get_time_ms() - temp_time
@@ -113,9 +114,9 @@ function record(output::AbstractString;
                 temp_time = get_time_ms()
                 # eventually we will zip multiple concurrent streams for SDRs together here.
                 # this shoudl be fast...
-                for sample_ind in eachindex(first(buffers[1]))
+                for sample_ind in eachindex(first(buffers))
                     for chan_ind in 1:num_channels
-                        sample = buffers[1][chan_ind][sample_ind]
+                        sample = buffers[chan_ind][sample_ind]
                         @ccall write(io::Cint, pointer_from_objref(Ref(sample))::Ptr{Cchar}, sizeof(format)::Cint, 0::Cint)::Cint
                     end
                 end
