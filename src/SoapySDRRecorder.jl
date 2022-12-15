@@ -59,6 +59,7 @@ function record(output::AbstractString;
     # TODO put in signature
     buffers = [Vector{Complex{Int16}}(undef, buffsz) for _ in 1:num_channels]
 
+    @show rxStream.mtu
     byte_len = sizeof(format)*length(first(buffers))
 
     # output timings to console. Our austere TimerOutputs.jl
@@ -77,7 +78,8 @@ function record(output::AbstractString;
     if io < 0
         error("Error opening file, returned: $io")
     end
-    @show io
+    # convert fd to stdio, it is faster
+    io = @ccall fdopen(io::Cint, "w"::Cstring)::Ptr{Cint}
 
     # If there is timing slack, we can sleep a bit to run event handlers
     have_slack = true
@@ -122,7 +124,8 @@ function record(output::AbstractString;
                 temp_bytes = Base.gc_bytes()
                 temp_time = get_time_us()
                 for sample in buffers
-                    ret = @ccall write(io::Cint, pointer(sample)::Ptr{Cchar}, byte_len::Cint, 0::Cint)::Cint
+                    # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
+                    ret = @ccall fwrite(pointer(sample)::Ptr{Complex{Int16}}, 4::Csize_t, length(sample)::Cint, io::Ptr{Cint})::Csize_t
                     if ret < 0
                         error("Error writing to file: $ret")
                     end
@@ -131,7 +134,6 @@ function record(output::AbstractString;
                 timers[2] = get_time_us() - temp_time
                 ready_to_write = false
             end
-            SoapySDR.SoapySDRDevice_releaseReadBuffer(device, rxStream, handle)
 
             if have_slack && timer_display
                 temp_bytes = Base.gc_bytes()
