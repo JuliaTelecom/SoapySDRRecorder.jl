@@ -6,7 +6,7 @@ using Unitful
 using BufferedStreams
 
 gc_bytes() = Base.gc_bytes()
-get_time_ms() = trunc(Int, time() * 1000)
+get_time_us() = trunc(Int, time()*1_000_000)
 
 """
     record(output_file; direct_buffer_access = false, timer_display = true,
@@ -52,15 +52,17 @@ function record(output::AbstractString;
 
     # create a re-usable buffer for rx samples
     buffsz = rxStream.mtu
-    buff = Array{format}(undef, buffsz)
     buffs = Ptr{format}[C_NULL] # pointer for direct buffer API
     # Allocate some buffers
     # concurrent ring buffer?
-    num_buffers = 16 
+    # for some reason the compiler does not constant prop the type
+    # TODO put in signature
     buffers = [Vector{Complex{Int16}}(undef, buffsz) for _ in 1:num_channels]
 
-    @show typeof(buffers)
-    last_timeoutput = get_time_ms()
+    byte_len = sizeof(format)*length(first(buffers))
+
+    # output timings to console. Our austere TimerOutputs.jl
+    last_timeoutput = get_time_us()
 
     # compute timeout based on sample_rate
     timeout_estimate = buffsz/first(channels).sample_rate*2
@@ -69,19 +71,25 @@ function record(output::AbstractString;
     # all sample rates should be the same
     @assert all(c -> c.sample_rate == first(channels).sample_rate, channels)
 
-    @show timeout_estimate
-
-    io = @ccall open(output::Cstring, 1::Cint)::Cint
+    # open up the output file
+    touch(abspath(output))
+    io = @ccall open(abspath(output)::Cstring, 1::Cint)::Cint
+    if io < 0
+        error("Error opening file, returned: $io")
+    end
+    @show io
 
     # If there is timing slack, we can sleep a bit to run event handlers
     have_slack = true
 
+    # Our bespoke TimerOutputs.jl implementation
     timers = [0,0,0]
     allocations = [0,0,0]
     temp_bytes = 0
     temp_time = 0
 
     handle = 0 # TODO match type to C return
+    ready_to_write = false
 
     # Enable ther stream
     @info "streaming..."
@@ -90,9 +98,10 @@ function record(output::AbstractString;
         while true
             begin
                 temp_bytes = Base.gc_bytes()
-                temp_time = get_time_ms()
+                temp_time = get_time_us()
                 if !direct_buffer_access
                     read!(rxStream, buffers, timeout=timeout_estimate)
+                    ready_to_write = true
                 else
                     err, handle, flags, timeNs =
                         SoapySDR.SoapySDRDevice_acquireReadBuffer(device, rxStream, buffs, timeout_estimate)
@@ -107,39 +116,38 @@ function record(output::AbstractString;
                     buffers = unsafe_wrap(Array{format}, buffs[1], (buffsz,))
                 end
                 allocations[1] += Base.gc_bytes() - temp_bytes
-                timers[1] = get_time_ms() - temp_time
+                timers[1] = get_time_us() - temp_time
             end
-            begin
+            if ready_to_write
                 temp_bytes = Base.gc_bytes()
-                temp_time = get_time_ms()
-                # eventually we will zip multiple concurrent streams for SDRs together here.
-                # this shoudl be fast...
-                for sample_ind in eachindex(first(buffers))
-                    for chan_ind in 1:num_channels
-                        sample = buffers[chan_ind][sample_ind]
-                        @ccall write(io::Cint, pointer_from_objref(Ref(sample))::Ptr{Cchar}, sizeof(format)::Cint, 0::Cint)::Cint
+                temp_time = get_time_us()
+                for sample in buffers
+                    ret = @ccall write(io::Cint, pointer(sample)::Ptr{Cchar}, byte_len::Cint, 0::Cint)::Cint
+                    if ret < 0
+                        error("Error writing to file: $ret")
                     end
                 end
                 allocations[2] += Base.gc_bytes() - temp_bytes
-                timers[2] = get_time_ms() - temp_time
+                timers[2] = get_time_us() - temp_time
+                ready_to_write = false
             end
             SoapySDR.SoapySDRDevice_releaseReadBuffer(device, rxStream, handle)
 
             if have_slack && timer_display
                 temp_bytes = Base.gc_bytes()
-                temp_time = get_time_ms()
+                temp_time = get_time_us()
                 begin
-                    if get_time_ms() - last_timeoutput > 1000
+                    if get_time_us() - last_timeoutput > 1_000_000
                         # some hackery to not allocate on the Julia GC so we use libc printf
-                        @ccall printf("Read Stream: %ld allocations: %ld \n"::Cstring, timers[1]::Int, allocations[1]::Int)::Cint
-                        @ccall printf("Write File: %ld allocations: %ld \n"::Cstring, timers[2]::Int, allocations[2]::Int)::Cint
-                        @ccall printf("Telemetry: %ld allocations: %ld \n"::Cstring, timers[3]::Int, allocations[3]::Int)::Cint
+                        @ccall printf("Read Stream: %ld μs, allocations: %ld bytes\n"::Cstring, timers[1]::Int, allocations[1]::Int)::Cint
+                        @ccall printf("Write File: %ld μs, allocations: %ld bytes\n"::Cstring, timers[2]::Int, allocations[2]::Int)::Cint
+                        @ccall printf("Telemetry: %ld μs, allocations: %ld bytes\n"::Cstring, timers[3]::Int, allocations[3]::Int)::Cint
                         @ccall _flushlbf()::Cvoid
-                        last_timeoutput = get_time_ms()
+                        last_timeoutput = get_time_us()
                     end
                 end
                 allocations[3] += Base.gc_bytes() - temp_bytes
-                timers[3] = get_time_ms() - temp_time
+                timers[3] = get_time_us() - temp_time
             end
             begin
                 have_slack && GC.gc(false)
