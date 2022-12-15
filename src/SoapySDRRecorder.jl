@@ -1,7 +1,6 @@
 module SoapySDRRecorder
 
 using SoapySDR
-using SigMF
 using Unitful
 using BufferedStreams
 
