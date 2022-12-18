@@ -105,7 +105,9 @@ function record(output::AbstractString;
                 @ccall printf("O"::Cstring)::Cint
                 @ccall _flushlbf()::Cvoid
                 nread = mtu
-            end
+            elseif nread < 0
+                error("Error reading from stream: $(SoapySDR.SoapySDR_errToStr(nread))")
+            end # else nread is the number of samples read, write to file next
             allocations[1] += Base.gc_bytes() - temp_bytes
             timers[1] += get_time_us() - temp_time
 
