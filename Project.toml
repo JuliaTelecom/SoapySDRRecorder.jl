@@ -9,6 +9,7 @@ SoapySDR = "4fa426e6-03fd-45b2-b2dd-25f726820c03"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [compat]
+SoapySDR = "0.5"
 julia = "1"
 
 [extras]
