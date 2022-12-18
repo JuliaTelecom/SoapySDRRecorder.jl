@@ -96,8 +96,18 @@ function record(output::AbstractString;
                 mtu,
                 timeout_estimate,
             )
+            if nread == SoapySDR.SOAPY_SDR_TIMEOUT
+                @ccall printf("T"::Cstring)::Cint
+                @ccall _flushlbf()::Cvoid
+                continue
+            elseif nread == SoapySDR.SOAPY_SDR_OVERFLOW
+                # just keep going and set to MTU
+                @ccall printf("O"::Cstring)::Cint
+                @ccall _flushlbf()::Cvoid
+                nread = mtu
+            end
             allocations[1] += Base.gc_bytes() - temp_bytes
-            timers[1] = get_time_us() - temp_time
+            timers[1] += get_time_us() - temp_time
 
             temp_bytes = Base.gc_bytes()
             temp_time = get_time_us()
@@ -109,7 +119,7 @@ function record(output::AbstractString;
                 end
             end
             allocations[2] += Base.gc_bytes() - temp_bytes
-            timers[2] = get_time_us() - temp_time
+            timers[2] += get_time_us() - temp_time
 
             if timer_display
                 temp_bytes = Base.gc_bytes()
@@ -117,20 +127,22 @@ function record(output::AbstractString;
                 begin
                     if get_time_us() - last_timeoutput > 1_000_000
                         # some hackery to not allocate on the Julia GC so we use libc printf
-                        @ccall printf("Read Stream: %ld μs, allocations: %ld bytes\n"::Cstring, timers[1]::Int, allocations[1]::Int)::Cint
-                        @ccall printf("Write File: %ld μs, allocations: %ld bytes\n"::Cstring, timers[2]::Int, allocations[2]::Int)::Cint
-                        @ccall printf("Telemetry: %ld μs, allocations: %ld bytes\n"::Cstring, timers[3]::Int, allocations[3]::Int)::Cint
+                        @ccall printf("Read Stream: %ld μs, expected time: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[1]::Int, timeout_estimate::Cint, allocations[1]::Int)::Cint
+                        @ccall printf("Write File: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[2]::Int, allocations[2]::Int)::Cint
+                        @ccall printf("Telemetry: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[3]::Int, allocations[3]::Int)::Cint
                         @ccall _flushlbf()::Cvoid
                         last_timeoutput = get_time_us()
+                        timers .= 0
                     end
                 end
                 allocations[3] += Base.gc_bytes() - temp_bytes
-                timers[3] = get_time_us() - temp_time
+                timers[3] += get_time_us() - temp_time
             end
         end
     finally
         SoapySDR.deactivate!(rxStream)
         @ccall close(io::Cint)::Cint
+
     end
 end
 
