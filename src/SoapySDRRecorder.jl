@@ -24,7 +24,9 @@ function record(output::AbstractString;
                 device::Union{Nothing, SoapySDR.Device}=nothing, #XXX: Make this KWargs
                 channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
                 channel_configuration::Union{Nothing, Function}=nothing,
+                telemetry_callback::Union{Nothing, Function}=nothing,
                 compress = false,
+                compression_level = 0,
                 stream_type::Type{T}=Complex{Int16}) where T
 
     # open the first device
@@ -36,6 +38,8 @@ function record(output::AbstractString;
             @info "No device specified, selecting first device available"
             device = Device(devices[1])
         end
+    else
+        device
     end
 
     channels = if channels === nothing
@@ -79,7 +83,7 @@ function record(output::AbstractString;
     end
     # convert fd to stdio, it is faster
     io = @ccall fdopen(io::Cint, "w"::Cstring)::Ptr{Cint}
-    compress_io = GZip.open(output*".gz", "w0")
+    compress_io = GZip.open(output*".gz", "w"*string(compression_level))
 
     # Our bespoke TimerOutputs.jl implementation
     timers = [0,0,0]
@@ -138,6 +142,7 @@ function record(output::AbstractString;
                 temp_time = get_time_us()
                 begin
                     if get_time_us() - last_timeoutput > 1_000_000
+                        telemetry_callback !== nothing && telemetry_callback(device, channels)
                         # some hackery to not allocate on the Julia GC so we use libc printf
                         @ccall printf("Read Stream: %ld μs, expected time: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[1]::Int, timeout_estimate::Cint, allocations[1]::Int)::Cint
                         @ccall printf("Write File: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[2]::Int, allocations[2]::Int)::Cint
