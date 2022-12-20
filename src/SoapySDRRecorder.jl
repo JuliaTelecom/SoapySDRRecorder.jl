@@ -3,23 +3,28 @@ module SoapySDRRecorder
 using SoapySDR
 using Unitful
 using BufferedStreams
+using GZip
 
 gc_bytes() = Base.gc_bytes()
 get_time_us() = trunc(Int, time()*1_000_000) #microseconds is a reasonable measure
 
 """
-    record(output_file; direct_buffer_access = false, timer_display = true,
-           device::Union{Nothing, SoapySDR.Device}=nothing, #XXX: Make this KWargs
-           channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
-           channel_configuration::Union{Nothing, Function}=nothing)
+record(output::AbstractString;
+                timer_display = true,
+                device::Union{Nothing, SoapySDR.Device}=nothing, #XXX: Make this KWargs
+                channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
+                channel_configuration::Union{Nothing, Function}=nothing,
+                stream_type::Type{T}=Complex{Int16}) 
 
-Record data from a SDR device to a file or IOBuffer.
+Record data from a SDR device..
+
 """
 function record(output::AbstractString;
                 timer_display = true,
                 device::Union{Nothing, SoapySDR.Device}=nothing, #XXX: Make this KWargs
                 channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
                 channel_configuration::Union{Nothing, Function}=nothing,
+                compress = false,
                 stream_type::Type{T}=Complex{Int16}) where T
 
     # open the first device
@@ -74,6 +79,7 @@ function record(output::AbstractString;
     end
     # convert fd to stdio, it is faster
     io = @ccall fdopen(io::Cint, "w"::Cstring)::Ptr{Cint}
+    compress_io = GZip.open(output*".gz", "w0")
 
     # Our bespoke TimerOutputs.jl implementation
     timers = [0,0,0]
@@ -85,7 +91,7 @@ function record(output::AbstractString;
     @info "streaming..."
     SoapySDR.activate!(rxStream)
     try
-        while true
+        @inbounds while true
             temp_bytes = Base.gc_bytes()
             temp_time = get_time_us()
             # collect list of pointers to pass to SoapySDR
@@ -115,9 +121,13 @@ function record(output::AbstractString;
             temp_time = get_time_us()
             for sample in buffers
                 # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
-                ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, nread::Cint, io::Ptr{Cint})::Csize_t
-                if ret < 0
-                    error("Error writing to file: $ret")
+                if compress
+                    write(compress_io, sample)
+                else
+                    ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, nread::Cint, io::Ptr{Cint})::Csize_t
+                    if ret < 0
+                        error("Error writing to file: $ret")
+                    end
                 end
             end
             allocations[2] += Base.gc_bytes() - temp_bytes
@@ -144,7 +154,7 @@ function record(output::AbstractString;
     finally
         SoapySDR.deactivate!(rxStream)
         @ccall close(io::Cint)::Cint
-
+        compress && close(compress_io)
     end
 end
 

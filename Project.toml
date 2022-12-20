@@ -5,6 +5,7 @@ version = "0.1.0"
 
 [deps]
 BufferedStreams = "e1450e63-4bb3-523b-b2a4-4ffa8c0fd77d"
+GZip = "92fee26a-97fe-5a0c-ad85-20a5f3185b63"
 SoapySDR = "4fa426e6-03fd-45b2-b2dd-25f726820c03"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
