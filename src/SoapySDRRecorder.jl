@@ -3,23 +3,28 @@ module SoapySDRRecorder
 using SoapySDR
 using Unitful
 using BufferedStreams
+using GZip
 
 gc_bytes() = Base.gc_bytes()
 get_time_us() = trunc(Int, time()*1_000_000) #microseconds is a reasonable measure
 
 """
-    record(output_file; direct_buffer_access = false, timer_display = true,
-           device::Union{Nothing, SoapySDR.Device}=nothing, #XXX: Make this KWargs
-           channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
-           channel_configuration::Union{Nothing, Function}=nothing)
+record(output::AbstractString;
+                timer_display = true,
+                device::Union{Nothing, SoapySDR.Device}=nothing, #XXX: Make this KWargs
+                channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
+                channel_configuration::Union{Nothing, Function}=nothing,
+                stream_type::Type{T}=Complex{Int16}) 
 
-Record data from a SDR device to a file or IOBuffer.
+Record data from a SDR device..
+
 """
 function record(output::AbstractString;
                 timer_display = true,
                 device::Union{Nothing, SoapySDR.Device}=nothing, #XXX: Make this KWargs
                 channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
                 channel_configuration::Union{Nothing, Function}=nothing,
+                compress = false,
                 stream_type::Type{T}=Complex{Int16}) where T
 
     # open the first device
@@ -74,6 +79,7 @@ function record(output::AbstractString;
     end
     # convert fd to stdio, it is faster
     io = @ccall fdopen(io::Cint, "w"::Cstring)::Ptr{Cint}
+    compress_io = GZip.open(output*".gz", "w0")
 
     # Our bespoke TimerOutputs.jl implementation
     timers = [0,0,0]
@@ -85,7 +91,7 @@ function record(output::AbstractString;
     @info "streaming..."
     SoapySDR.activate!(rxStream)
     try
-        while true
+        @inbounds while true
             temp_bytes = Base.gc_bytes()
             temp_time = get_time_us()
             # collect list of pointers to pass to SoapySDR
@@ -96,20 +102,36 @@ function record(output::AbstractString;
                 mtu,
                 timeout_estimate,
             )
+            if nread == SoapySDR.SOAPY_SDR_TIMEOUT
+                @ccall printf("T"::Cstring)::Cint
+                @ccall _flushlbf()::Cvoid
+                continue
+            elseif nread == SoapySDR.SOAPY_SDR_OVERFLOW
+                # just keep going and set to MTU
+                @ccall printf("O"::Cstring)::Cint
+                @ccall _flushlbf()::Cvoid
+                nread = mtu
+            elseif nread < 0
+                error("Error reading from stream: $(SoapySDR.SoapySDR_errToStr(nread))")
+            end # else nread is the number of samples read, write to file next
             allocations[1] += Base.gc_bytes() - temp_bytes
-            timers[1] = get_time_us() - temp_time
+            timers[1] += get_time_us() - temp_time
 
             temp_bytes = Base.gc_bytes()
             temp_time = get_time_us()
             for sample in buffers
                 # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
-                ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, nread::Cint, io::Ptr{Cint})::Csize_t
-                if ret < 0
-                    error("Error writing to file: $ret")
+                if compress
+                    write(compress_io, sample)
+                else
+                    ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, nread::Cint, io::Ptr{Cint})::Csize_t
+                    if ret < 0
+                        error("Error writing to file: $ret")
+                    end
                 end
             end
             allocations[2] += Base.gc_bytes() - temp_bytes
-            timers[2] = get_time_us() - temp_time
+            timers[2] += get_time_us() - temp_time
 
             if timer_display
                 temp_bytes = Base.gc_bytes()
@@ -117,20 +139,22 @@ function record(output::AbstractString;
                 begin
                     if get_time_us() - last_timeoutput > 1_000_000
                         # some hackery to not allocate on the Julia GC so we use libc printf
-                        @ccall printf("Read Stream: %ld μs, allocations: %ld bytes\n"::Cstring, timers[1]::Int, allocations[1]::Int)::Cint
-                        @ccall printf("Write File: %ld μs, allocations: %ld bytes\n"::Cstring, timers[2]::Int, allocations[2]::Int)::Cint
-                        @ccall printf("Telemetry: %ld μs, allocations: %ld bytes\n"::Cstring, timers[3]::Int, allocations[3]::Int)::Cint
+                        @ccall printf("Read Stream: %ld μs, expected time: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[1]::Int, timeout_estimate::Cint, allocations[1]::Int)::Cint
+                        @ccall printf("Write File: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[2]::Int, allocations[2]::Int)::Cint
+                        @ccall printf("Telemetry: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[3]::Int, allocations[3]::Int)::Cint
                         @ccall _flushlbf()::Cvoid
                         last_timeoutput = get_time_us()
+                        timers .= 0
                     end
                 end
                 allocations[3] += Base.gc_bytes() - temp_bytes
-                timers[3] = get_time_us() - temp_time
+                timers[3] += get_time_us() - temp_time
             end
         end
     finally
         SoapySDR.deactivate!(rxStream)
         @ccall close(io::Cint)::Cint
+        compress && close(compress_io)
     end
 end
 
