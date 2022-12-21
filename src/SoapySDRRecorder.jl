@@ -195,6 +195,7 @@ function record(output::AbstractString;
                         @ccall fprintf(csv_log_io::Ptr{Cint}, "%ld,%ld,%ld,%ld,"::Cstring, get_time_us()::Int, num_bufs_read::Int, num_overflows::Int, num_timeouts::Int)::Cint
                         csv_log_callback !== nothing && csv_log_callback(csv_log_io, device, channels)
                         @ccall fprintf(csv_log_io::Ptr{Cint}, "\n"::Cstring)::Cint
+                        @ccall fflush(csv_log_io::Ptr{Cint})::Cint
                         last_csvoutput = get_time_us()
                     end
                 end
