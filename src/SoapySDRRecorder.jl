@@ -25,6 +25,7 @@ function record(output::AbstractString;
                 channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
                 channel_configuration::Union{Nothing, Function}=nothing,
                 telemetry_callback::Union{Nothing, Function}=nothing,
+                timeout = nothing,
                 compress = false,
                 compression_level = 0,
                 stream_type::Type{T}=Complex{Int16}) where T
@@ -68,8 +69,16 @@ function record(output::AbstractString;
     # output timings to console. Our austere TimerOutputs.jl
     last_timeoutput = get_time_us()
 
-    # compute timeout based on sample_rate
-    timeout_estimate = uconvert(u"μs", mtu/first(channels).sample_rate*2).val
+    # compute timeout based on sample_rate, in integer microseconds for Soapy
+    # note that poll has milisecond precision, so manually overriding this
+    # for small MTU is sometimes required to avoid exesssive timeout reports
+    timeout_estimate = if timeout === nothing
+        trunc(Int, uconvert(u"μs", mtu/first(channels).sample_rate*2).val)
+    elseif typeof(timeout) <: Unitful.AbstractQuantity
+        trunc(Int, uconvert(u"μs", timeout).val)
+    else
+        trunc(Int,timeout)
+    end
 
     # assert some properties
     # all sample rates should be the same
@@ -81,9 +90,8 @@ function record(output::AbstractString;
     for i in 1:num_channels
         output_base = abspath(output)*"."*string(i)*".dat"
         if !compress
-            output = output_base
-            touch(output)
-            io_c = @ccall open(abspath(output)::Cstring, 1::Cint)::Cint
+            touch(output_base)
+            io_c = @ccall open(abspath(output_base)::Cstring, 1::Cint)::Cint
             if io_c < 0
                 error("Error opening file, returned: $io_c")
             end
@@ -99,6 +107,7 @@ function record(output::AbstractString;
     allocations = [0,0,0]
     temp_bytes = 0
     temp_time = 0
+    num_bufs_read = 0
 
     # Enable ther stream
     @info "streaming..."
@@ -117,16 +126,19 @@ function record(output::AbstractString;
             )
             if nread == SoapySDR.SOAPY_SDR_TIMEOUT
                 @ccall printf("T"::Cstring)::Cint
-                @ccall _flushlbf()::Cvoid
+                #@ccall _flushlbf()::Cvoid
+                allocations[1] += Base.gc_bytes() - temp_bytes
+                timers[1] += get_time_us() - temp_time
                 continue
             elseif nread == SoapySDR.SOAPY_SDR_OVERFLOW
                 # just keep going and set to MTU
                 @ccall printf("O"::Cstring)::Cint
-                @ccall _flushlbf()::Cvoid
+                #@ccall _flushlbf()::Cvoid
                 nread = mtu
             elseif nread < 0
                 error("Error reading from stream: $(SoapySDR.SoapySDR_errToStr(nread))")
             end # else nread is the number of samples read, write to file next
+            num_bufs_read += 1
             allocations[1] += Base.gc_bytes() - temp_bytes
             timers[1] += get_time_us() - temp_time
 
@@ -157,6 +169,7 @@ function record(output::AbstractString;
                         @ccall printf("Read Stream: %ld μs, expected time: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[1]::Int, timeout_estimate::Cint, allocations[1]::Int)::Cint
                         @ccall printf("Write File: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[2]::Int, allocations[2]::Int)::Cint
                         @ccall printf("Telemetry: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[3]::Int, allocations[3]::Int)::Cint
+                        @ccall printf("Number of Buffers read: %ld\n"::Cstring, num_bufs_read::Int)::Cint
                         @ccall _flushlbf()::Cvoid
                         last_timeoutput = get_time_us()
                         timers .= 0
@@ -168,8 +181,10 @@ function record(output::AbstractString;
         end
     finally
         SoapySDR.deactivate!(rxStream)
-        @ccall close(io::Cint)::Cint
-        compress && close(compress_io)
+        for i in 1:num_channels
+            @ccall close(io[i]::Cint)::Cint
+            compress && close(compress_io[i])
+        end
     end
 end
 

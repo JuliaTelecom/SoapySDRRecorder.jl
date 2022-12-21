@@ -1,9 +1,9 @@
-using SoapyRTLSDR_jll, SoapySDR, SoapySDRRecorder, Unitful
+using SoapySDR, SoapySDRRecorder, Unitful
 
 # Channel confuguration callback
 function configuration(dev, chans)
 
-    dev[SoapySDR.Setting("biastee")] = "true"
+    #dev[SoapySDR.Setting("biastee")] = "true"
 
     for rx in chans
         rx.sample_rate = 2u"MHz"
