@@ -13,4 +13,5 @@ function configuration(dev, chans)
 
 end
 
-SoapySDRRecorder.record("test.dat", device=Device(SoapySDR.Devices()[1]), channel_configuration=configuration)
+SoapySDRRecorder.record("test", device=Device(SoapySDR.Devices()[1]), channel_configuration=configuration)
+

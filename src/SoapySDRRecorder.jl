@@ -76,14 +76,23 @@ function record(output::AbstractString;
     @assert all(c -> c.sample_rate == first(channels).sample_rate, channels)
 
     # open up the output file
-    touch(abspath(output))
-    io = @ccall open(abspath(output)::Cstring, 1::Cint)::Cint
-    if io < 0
-        error("Error opening file, returned: $io")
+    io = Ptr{Cint}[]
+    compress_io = GZipStream[]
+    for i in 1:num_channels
+        output_base = abspath(output)*"."*string(i)*".dat"
+        if !compress
+            output = output_base
+            touch(output)
+            io_c = @ccall open(abspath(output)::Cstring, 1::Cint)::Cint
+            if io_c < 0
+                error("Error opening file, returned: $io_c")
+            end
+            # convert fd to stdio, it is faster
+            push!(io, @ccall fdopen(io_c::Cint, "w"::Cstring)::Ptr{Cint})
+        else
+            push!(compress_io, GZip.open(output_base*".gz", "w"*string(compression_level)))
+        end
     end
-    # convert fd to stdio, it is faster
-    io = @ccall fdopen(io::Cint, "w"::Cstring)::Ptr{Cint}
-    compress_io = GZip.open(output*".gz", "w"*string(compression_level))
 
     # Our bespoke TimerOutputs.jl implementation
     timers = [0,0,0]
@@ -123,12 +132,13 @@ function record(output::AbstractString;
 
             temp_bytes = Base.gc_bytes()
             temp_time = get_time_us()
-            for sample in buffers
+            for i in eachindex(buffers)
+                sample = buffers[i]
                 # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
                 if compress
-                    write(compress_io, sample)
+                    write(compress_io[i], sample)
                 else
-                    ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, nread::Cint, io::Ptr{Cint})::Csize_t
+                    ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, nread::Cint, io[i]::Ptr{Cint})::Csize_t
                     if ret < 0
                         error("Error writing to file: $ret")
                     end
