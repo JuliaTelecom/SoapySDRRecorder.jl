@@ -126,7 +126,7 @@ function record(output::AbstractString;
         # convert fd to stdio, it is faster
         csv_log_io = @ccall fdopen(csv_log_io::Cint, "w"::Cstring)::Ptr{Cint}
         @ccall fprintf(csv_log_io::Ptr{Cint}, "time_us,num_bufs_read,num_overflows,num_timeouts,"::Cstring, get_time_us()::Int, num_bufs_read::Int, num_overflows::Int, num_timeouts::Int)::Cint
-        csv_header_callback !== nothing && csv_header_callback(csv_log_io, device, channels)
+        csv_header_callback !== nothing && csv_header_callback(csv_log_io)
         @ccall fprintf(csv_log_io::Ptr{Cint}, "\n"::Cstring)::Cint
     end
 
