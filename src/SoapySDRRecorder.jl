@@ -176,11 +176,13 @@ function record(output::AbstractString;
                 # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
                 if compress
                     write(compress_io[i], sample)
+                    flush(compress_io[i])
                 else
                     ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, nread::Cint, io[i]::Ptr{Cint})::Csize_t
                     if ret < 0
                         error("Error writing to file: $ret")
                     end
+                    @ccall fflush(io[i]::Ptr{Cint})::Cint
                 end
             end
             allocations[2] += Base.gc_bytes() - temp_bytes
