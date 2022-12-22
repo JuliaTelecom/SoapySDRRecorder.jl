@@ -134,6 +134,9 @@ function record(output::AbstractString;
     last_timeoutput = get_time_us()
     last_csvoutput = get_time_us()
 
+    have_slack = false
+    write_buf = true
+
     # Enable ther stream
     @info "streaming..."
     SoapySDR.activate!(rxStream)
@@ -149,60 +152,81 @@ function record(output::AbstractString;
                 mtu,
                 timeout_estimate,
             )
+            write_buf = true
+            have_slack = false
             if nread == SoapySDR.SOAPY_SDR_TIMEOUT
-                @ccall printf("T"::Cstring)::Cint
+                #@ccall printf("T"::Cstring)::Cint
                 #@ccall _flushlbf()::Cvoid
                 num_timeouts += 1
-                allocations[1] += Base.gc_bytes() - temp_bytes
-                timers[1] += get_time_us() - temp_time
-                continue
+                have_slack = true
+                write_buf = false
             elseif nread == SoapySDR.SOAPY_SDR_OVERFLOW
                 # just keep going and set to MTU
                 @ccall printf("O"::Cstring)::Cint
                 #@ccall _flushlbf()::Cvoid
                 nread = mtu
                 num_overflows += 1
+                num_bufs_read += 1
             elseif nread < 0
                 error("Error reading from stream: $(SoapySDR.SoapySDR_errToStr(nread))")
-            end # else nread is the number of samples read, write to file next
-            num_bufs_read += 1
-            allocations[1] += Base.gc_bytes() - temp_bytes
-            timers[1] += get_time_us() - temp_time
-
-            temp_bytes = Base.gc_bytes()
-            temp_time = get_time_us()
-            for i in eachindex(buffers)
-                sample = buffers[i]
-                # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
-                if compress
-                    write(compress_io[i], sample)
-                    flush(compress_io[i])
-                else
-                    ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, nread::Cint, io[i]::Ptr{Cint})::Csize_t
-                    if ret < 0
-                        error("Error writing to file: $ret")
-                    end
-                    @ccall fflush(io[i]::Ptr{Cint})::Cint
-                end
+            else
+                num_bufs_read += 1
             end
-            allocations[2] += Base.gc_bytes() - temp_bytes
-            timers[2] += get_time_us() - temp_time
+            if timer_display
+                allocations[1] += Base.gc_bytes() - temp_bytes
+                timers[1] += get_time_us() - temp_time
 
-            if csv_log
                 temp_bytes = Base.gc_bytes()
                 temp_time = get_time_us()
+            end
+            if write_buf == true
+                for i in eachindex(buffers)
+                    sample = buffers[i]
+                    # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
+                    if compress
+                        write(compress_io[i], sample)
+                        have_slack && flush(compress_io[i])
+                    else
+                        ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, nread::Cint, io[i]::Ptr{Cint})::Csize_t
+                        if ret < 0
+                            error("Error writing to file: $ret")
+                        end
+                        have_slack && @ccall fflush(io[i]::Ptr{Cint})::Cint
+                    end
+                end
+                if timer_display
+                    allocations[2] += Base.gc_bytes() - temp_bytes
+                    timers[2] += get_time_us() - temp_time
+                end
+            end
+            if have_slack
+                for i in eachindex(buffers)
+                    if compress
+                        flush(compress_io[i])
+                    else
+                        @ccall fflush(io[i]::Ptr{Cint})::Cint
+                    end
+                end
+            end
+            if csv_log
+                if timer_display
+                    temp_bytes = Base.gc_bytes()
+                    temp_time = get_time_us()
+                end
                 begin
                     if get_time_us() - last_csvoutput > 1_000_000
                         # We will log some stats here, then let the callback add things.
                         @ccall fprintf(csv_log_io::Ptr{Cint}, "%ld,%ld,%ld,%ld,"::Cstring, get_time_us()::Int, num_bufs_read::Int, num_overflows::Int, num_timeouts::Int)::Cint
                         csv_log_callback !== nothing && csv_log_callback(csv_log_io, device, channels)
                         @ccall fprintf(csv_log_io::Ptr{Cint}, "\n"::Cstring)::Cint
-                        @ccall fflush(csv_log_io::Ptr{Cint})::Cint
+                        have_slack && @ccall fflush(csv_log_io::Ptr{Cint})::Cint
                         last_csvoutput = get_time_us()
                     end
                 end
-                allocations[3] += Base.gc_bytes() - temp_bytes
-                timers[3] += get_time_us() - temp_time
+                if timer_display
+                    allocations[3] += Base.gc_bytes() - temp_bytes
+                    timers[3] += get_time_us() - temp_time
+                end
             end
 
             if timer_display
