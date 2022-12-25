@@ -4,6 +4,7 @@ using SoapySDR
 using Unitful
 using BufferedStreams
 using GZip
+using Base.Threads
 
 gc_bytes() = Base.gc_bytes()
 get_time_us() = trunc(Int, time()*1_000_000) #microseconds is a reasonable measure
@@ -32,7 +33,12 @@ function record(output::AbstractString;
                 compression_level = 0,
                 csv_log = true,
                 show_timer_stats = true,
-                stream_type::Type{T}=Complex{Int16}) where T
+                stream_type::Type{T}=Complex{Int16},
+                initial_buffers=64) where T
+
+    if Threads.nthreads() < 3
+        error("This program requires at least 3 threads to run")
+    end
 
     # open the first device
     device = if device === nothing
@@ -64,14 +70,6 @@ function record(output::AbstractString;
 
     mtu = rxStream.mtu
 
-    # Allocate some buffers for each channel
-    # for some reason the compiler does not constant prop the type
-    # TODO put in signature
-    buffers = [Vector{T}(undef, mtu) for _ in 1:num_channels]
-    buff_ptrs = pointer(map(pointer, buffers))
-
-
-
     # compute timeout based on sample_rate, in integer microseconds for Soapy
     # note that poll has milisecond precision, so manually overriding this
     # for small MTU is sometimes required to avoid exesssive timeout reports
@@ -102,6 +100,35 @@ function record(output::AbstractString;
     io = Ptr{Cint}[]
     csv_log_io = Ptr{Cint}(0)
     compress_io = GZipStream[]
+
+    # this channel is filled by reading off the SDR
+    received_channel = Channel{Tuple{Vector{Vector{T}}, Ptr{Ptr{T}}}}(Inf)
+    # this channel is the return-side once wrting is finished
+    return_channel = Channel{Tuple{Vector{Vector{T}}, Ptr{Ptr{T}}}}(Inf)
+
+    # Allocate some buffers for each channel
+    for _ in 1:initial_buffers
+        buf = [Vector{T}(undef, mtu) for _ in 1:num_channels]
+        ptrs = pointer(map(pointer, buf))
+        put!(return_channel, (buf, ptrs))
+    end
+
+    # we will keep track of the array pool size here
+    array_pool_size = initial_buffers
+
+    # This task will make sure there is always a buffer available
+    # for the SDR to read into
+    @info "Spawning buffer pool task..."
+    pool_task = Threads.@spawn while true
+        if isempty(return_channel)
+            buf = [Vector{T}(undef, mtu) for _ in 1:num_channels]
+            ptrs = pointer(map(pointer, buf))
+            put!(return_channel, (buf, ptrs))
+            array_pool_size += 1
+        end
+    end
+
+    # Intialize file outputs
     for i in 1:num_channels
         output_base = abspath(output)*"."*string(i)*".dat"
         if !compress
@@ -141,25 +168,29 @@ function record(output::AbstractString;
     @info "streaming..."
     SoapySDR.activate!(rxStream)
     try
-        @inbounds while true
+        @info "Spawning reader task..."
+        # SDR Reader Task
+        sdr_reader = Threads.@spawn while true
             temp_bytes = Base.gc_bytes()
             temp_time = get_time_us()
+            (buf, ptr) = take!(return_channel)
             # collect list of pointers to pass to SoapySDR
             nread, out_flags, timens = SoapySDR.SoapySDRDevice_readStream(
                 rxStream.d,
                 rxStream,
-                buff_ptrs,
+                ptr,
                 mtu,
                 timeout_estimate,
             )
-            write_buf = true
-            have_slack = false
             if nread == SoapySDR.SOAPY_SDR_TIMEOUT
                 #@ccall printf("T"::Cstring)::Cint
                 #@ccall _flushlbf()::Cvoid
-                #num_timeouts += 1
-                have_slack = true
-                write_buf = false
+                num_timeouts += 1
+                # put the buffer back into the queue
+                put!(return_channel, (buf, ptr))
+                allocations[1] += Base.gc_bytes() - temp_bytes
+                timers[1] += get_time_us() - temp_time
+                continue
             elseif nread == SoapySDR.SOAPY_SDR_OVERFLOW
                 # just keep going and set to MTU
                 #@ccall printf("O"::Cstring)::Cint
@@ -172,45 +203,40 @@ function record(output::AbstractString;
             else
                 num_bufs_read += 1
             end
-            if timer_display
-                allocations[1] += Base.gc_bytes() - temp_bytes
-                timers[1] += get_time_us() - temp_time
 
-                temp_bytes = Base.gc_bytes()
-                temp_time = get_time_us()
-            end
-            if write_buf == true
-                for i in eachindex(buffers)
-                    sample = buffers[i]
-                    # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
-                    if compress
-                        write(compress_io[i], sample)
-                        flush(compress_io[i])
-                    else
-                        ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, nread::Cint, io[i]::Ptr{Cint})::Csize_t
-                        if ret < 0
-                            error("Error writing to file: $ret")
-                        end
-                        @ccall fflush(io[i]::Ptr{Cint})::Cint
+            # send the buffer to the file writer
+            put!(received_channel, (buf, ptr))
+            allocations[1] += Base.gc_bytes() - temp_bytes
+            timers[1] += get_time_us() - temp_time
+        end
+
+        @info "Spawning file writer..."
+        # File Writer Task
+        file_writer = Threads.@spawn while true
+            temp_bytes = Base.gc_bytes()
+            temp_time = get_time_us()
+            buf, _ = take!(received_channel)
+            for i in eachindex(buf)
+                sample = buf[i]
+                # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
+                if compress
+                    write(compress_io[i], sample)
+                    flush(compress_io[i])
+                else
+                    ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, mtu::Cint, io[i]::Ptr{Cint})::Csize_t
+                    if ret < 0
+                        error("Error writing to file: $ret")
                     end
+                    @ccall fflush(io[i]::Ptr{Cint})::Cint
                 end
-                if timer_display
-                    allocations[2] += Base.gc_bytes() - temp_bytes
-                    timers[2] += get_time_us() - temp_time
-                end
-            else
-                continue
             end
-            #if have_slack
-            #    @ccall _flushlbf()::Cvoid
-            #    for i in eachindex(buffers)
-            #        if compress
-            #            flush(compress_io[i])
-            #        else
-            #            @ccall fflush(io[i]::Ptr{Cint})::Cint
-            #        end
-            #    end
-            #end
+            allocations[2] += Base.gc_bytes() - temp_bytes
+            timers[2] += get_time_us() - temp_time
+        end
+
+        @info "Spawning logger..."
+        # run this IO on the main thread
+        logger = Threads.@spawn while true
             if csv_log
                 begin
                     if get_time_us() - last_csvoutput > 1_000_000
@@ -243,7 +269,7 @@ function record(output::AbstractString;
                             @ccall printf("CSV Log: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[3]::Int, allocations[3]::Int)::Cint
                             @ccall printf("Telemetry: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[4]::Int, allocations[4]::Int)::Cint
                         end
-                        @ccall printf("Number of Buffers read: %ld Number of overflows: %ld\n"::Cstring, num_bufs_read::Int, num_overflows::Int)::Cint
+                        @ccall printf("Number of Buffers read: %ld Number of overflows: %ld Array Pool Size: %ld\n"::Cstring, num_bufs_read::Int, num_overflows::Int, array_pool_size::Int)::Cint
                         @ccall _flushlbf()::Cvoid
                         last_timeoutput = get_time_us()
                         timers .= 0
@@ -252,8 +278,11 @@ function record(output::AbstractString;
                     end
                 end
             end
-
         end
+        wait(sdr_reader)
+        wait(file_writer)
+        wait(logger)
+        wait(pool_task)
     finally
         SoapySDR.deactivate!(rxStream)
         for i in 1:num_channels
