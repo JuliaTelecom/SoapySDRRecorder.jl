@@ -251,7 +251,7 @@ function record(output::AbstractString;
                 if get_time_us() - last_timeoutput > 1_000_000
                     telemetry_callback !== nothing && telemetry_callback(device, channels)
                     # some hackery to not allocate on the Julia GC so we use libc printf
-                    @ccall printf("Number of Buffers read: %ld Number of overflows: %ld Number of timeouts: %ld\n"::Cstring, num_bufs_read::Int, num_overflows::Int, num_timeouts::Int)::Cint
+                    @ccall printf("Number of Buffers read: %ld Number of overflows: %ld Number of timeouts: %ld Array pool size: %ld\n"::Cstring, num_bufs_read::Int, num_overflows::Int, num_timeouts::Int, array_pool_size::Int)::Cint
                     @ccall _flushlbf()::Cvoid
                     last_timeoutput = get_time_us()
                 end
