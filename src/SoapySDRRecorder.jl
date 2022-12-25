@@ -157,12 +157,12 @@ function record(output::AbstractString;
             if nread == SoapySDR.SOAPY_SDR_TIMEOUT
                 #@ccall printf("T"::Cstring)::Cint
                 #@ccall _flushlbf()::Cvoid
-                num_timeouts += 1
+                #num_timeouts += 1
                 have_slack = true
                 write_buf = false
             elseif nread == SoapySDR.SOAPY_SDR_OVERFLOW
                 # just keep going and set to MTU
-                @ccall printf("O"::Cstring)::Cint
+                #@ccall printf("O"::Cstring)::Cint
                 #@ccall _flushlbf()::Cvoid
                 nread = mtu
                 num_overflows += 1
@@ -185,56 +185,57 @@ function record(output::AbstractString;
                     # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
                     if compress
                         write(compress_io[i], sample)
-                        have_slack && flush(compress_io[i])
+                        flush(compress_io[i])
                     else
                         ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, nread::Cint, io[i]::Ptr{Cint})::Csize_t
                         if ret < 0
                             error("Error writing to file: $ret")
                         end
-                        have_slack && @ccall fflush(io[i]::Ptr{Cint})::Cint
+                        @ccall fflush(io[i]::Ptr{Cint})::Cint
                     end
                 end
                 if timer_display
                     allocations[2] += Base.gc_bytes() - temp_bytes
                     timers[2] += get_time_us() - temp_time
                 end
+            else
+                continue
             end
-            if have_slack
-                for i in eachindex(buffers)
-                    if compress
-                        flush(compress_io[i])
-                    else
-                        @ccall fflush(io[i]::Ptr{Cint})::Cint
-                    end
-                end
-            end
+            #if have_slack
+            #    @ccall _flushlbf()::Cvoid
+            #    for i in eachindex(buffers)
+            #        if compress
+            #            flush(compress_io[i])
+            #        else
+            #            @ccall fflush(io[i]::Ptr{Cint})::Cint
+            #        end
+            #    end
+            #end
             if csv_log
-                if timer_display
-                    temp_bytes = Base.gc_bytes()
-                    temp_time = get_time_us()
-                end
                 begin
                     if get_time_us() - last_csvoutput > 1_000_000
+                        temp_bytes = Base.gc_bytes()
+                        temp_time = get_time_us()
                         # We will log some stats here, then let the callback add things.
                         @ccall fprintf(csv_log_io::Ptr{Cint}, "%ld,%ld,%ld,%ld,"::Cstring, get_time_us()::Int, num_bufs_read::Int, num_overflows::Int, num_timeouts::Int)::Cint
                         csv_log_callback !== nothing && csv_log_callback(csv_log_io, device, channels)
                         @ccall fprintf(csv_log_io::Ptr{Cint}, "\n"::Cstring)::Cint
-                        have_slack && @ccall fflush(csv_log_io::Ptr{Cint})::Cint
+                        @ccall fflush(csv_log_io::Ptr{Cint})::Cint
                         last_csvoutput = get_time_us()
+                        if timer_display
+                            allocations[3] += Base.gc_bytes() - temp_bytes
+                            timers[3] += get_time_us() - temp_time
+                        end
                     end
-                end
-                if timer_display
-                    allocations[3] += Base.gc_bytes() - temp_bytes
-                    timers[3] += get_time_us() - temp_time
                 end
             end
 
             if timer_display
-                temp_bytes = Base.gc_bytes()
-                temp_time = get_time_us()
                 begin
-                    if get_time_us() - last_timeoutput > 1_000_000
-                        telemetry_callback !== nothing && telemetry_callback(device, channels)
+                    if get_time_us() - last_timeoutput > 2_000_000
+                        temp_bytes = Base.gc_bytes()
+                        temp_time = get_time_us()
+                        #telemetry_callback !== nothing && telemetry_callback(device, channels)
                         # some hackery to not allocate on the Julia GC so we use libc printf
                         if show_timer_stats
                             @ccall printf("Read Stream: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[1]::Int, allocations[1]::Int)::Cint
@@ -242,14 +243,14 @@ function record(output::AbstractString;
                             @ccall printf("CSV Log: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[3]::Int, allocations[3]::Int)::Cint
                             @ccall printf("Telemetry: %ld μs, net allocations: %ld bytes\n"::Cstring, timers[4]::Int, allocations[4]::Int)::Cint
                         end
-                        @ccall printf("Number of Buffers read: %ld Number of overflows: %ld Number of timeouts: %ld\n"::Cstring, num_bufs_read::Int, num_overflows::Int, num_timeouts::Int)::Cint
+                        @ccall printf("Number of Buffers read: %ld Number of overflows: %ld\n"::Cstring, num_bufs_read::Int, num_overflows::Int)::Cint
                         @ccall _flushlbf()::Cvoid
                         last_timeoutput = get_time_us()
                         timers .= 0
+                        allocations[4] += Base.gc_bytes() - temp_bytes
+                        timers[4] += get_time_us() - temp_time
                     end
                 end
-                allocations[4] += Base.gc_bytes() - temp_bytes
-                timers[4] += get_time_us() - temp_time
             end
 
         end
