@@ -102,32 +102,30 @@ function record(output::AbstractString;
     compress_io = GZipStream[]
 
     # this channel is filled by reading off the SDR
-    received_channel = Channel{Tuple{Vector{Vector{T}}, Base.RefValue{Vector{Base.RefValue{Vector{T}}}}}}(Inf)
+    received_channel = Channel{Vector{Vector{T}}}(Inf)
     # this channel is the return-side once wrting is finished
-    return_channel = Channel{Tuple{Vector{Vector{T}}, Base.RefValue{Vector{Base.RefValue{Vector{T}}}}}}(Inf)
+    return_channel = Channel{Vector{Vector{T}}}(Inf)
 
     # Allocate some buffers for each channel
     for _ in 1:initial_buffers
         buf = [Vector{T}(undef, mtu) for _ in 1:num_channels]
-        ptrs = Ref(map(Ref, buf))
-        @show typeof(ptrs)
-        put!(return_channel, (buf, ptrs))
+        put!(return_channel, buf)
     end
 
     # we will keep track of the array pool size here
     array_pool_size = initial_buffers
 
+    GC.enable(false)
     # This task will make sure there is always a buffer available
     # for the SDR to read into
     @info "Spawning buffer pool task..."
-    #pool_task = Threads.@spawn while true
-    #    if isempty(return_channel)
-    #        buf = [Vector{T}(undef, mtu) for _ in 1:num_channels]
-    #        ptrs = pointer(map(pointer, buf))
-    #        put!(return_channel, (buf, ptrs))
-    #        array_pool_size += 1
-    #    end
-    #end
+    pool_task = Threads.@spawn while true
+        if isempty(return_channel)
+            buf = [Vector{T}(undef, mtu) for _ in 1:num_channels]
+            put!(return_channel, buf)
+            array_pool_size += 1
+        end
+    end
 
     # Intialize file outputs
     for i in 1:num_channels
@@ -174,9 +172,8 @@ function record(output::AbstractString;
         sdr_reader = Threads.@spawn while true
             #temp_bytes = Base.gc_bytes()
             #temp_time = get_time_us()
-            (buf, ptr) = take!(return_channel)
+            buf = take!(return_channel)
             # collect list of pointers to pass to SoapySDR
-            #ptrpointer(map(pointer, buf))
             nread, out_flags, timens = SoapySDR.SoapySDRDevice_readStream(
                 rxStream.d,
                 rxStream,
@@ -187,27 +184,27 @@ function record(output::AbstractString;
             if nread == SoapySDR.SOAPY_SDR_TIMEOUT
                 #@ccall printf("T"::Cstring)::Cint
                 #@ccall _flushlbf()::Cvoid
-                #num_timeouts += 1
+                num_timeouts += 1
                 # put the buffer back into the queue
-                put!(return_channel, (buf, ptr))
+                put!(return_channel, buf)
                 #allocations[1] += Base.gc_bytes() - temp_bytes
                 #timers[1] += get_time_us() - temp_time
                 continue
-            #elseif nread == SoapySDR.SOAPY_SDR_OVERFLOW
+            elseif nread == SoapySDR.SOAPY_SDR_OVERFLOW
                 # just keep going and set to MTU
                 #@ccall printf("O"::Cstring)::Cint
                 #@ccall _flushlbf()::Cvoid
                 #nread = mtu
-                #num_overflows += 1
-                #num_bufs_read += 1
-            #elseif nread < 0
-                #error("Error reading from stream: $(SoapySDR.SoapySDR_errToStr(nread))")
-            #else
-                #num_bufs_read += 1
+                num_overflows += 1
+                num_bufs_read += 1
+            elseif nread < 0
+                error("Error reading from stream: $(SoapySDR.SoapySDR_errToStr(nread))")
+            else
+                num_bufs_read += 1
             end
             #@info "read buffer"
             # send the buffer to the file writer
-            put!(received_channel, (buf, ptr))
+            put!(received_channel, buf)
             #allocations[1] += Base.gc_bytes() - temp_bytes
             #timers[1] += get_time_us() - temp_time
         end
@@ -217,7 +214,7 @@ function record(output::AbstractString;
         file_writer = Threads.@spawn while true
             #temp_bytes = Base.gc_bytes()
             #temp_time = get_time_us()
-            buf, ptr = take!(received_channel)
+            buf = take!(received_channel)
             #@info "writing buffer"
             for i in eachindex(buf)
                 sample = buf[i]
@@ -233,15 +230,38 @@ function record(output::AbstractString;
                     @ccall fflush(io[i]::Ptr{Cint})::Cint
                 end
             end
-            put!(return_channel, (buf, ptr))
+            put!(return_channel, buf)
             #allocations[2] += Base.gc_bytes() - temp_bytes
             #timers[2] += get_time_us() - temp_time
+        end
+
+        while true
+            if csv_log
+                if get_time_us() - last_csvoutput > 1_000_000
+                    # We will log some stats here, then let the callback add things.
+                    @ccall fprintf(csv_log_io::Ptr{Cint}, "%ld,%ld,%ld,%ld,"::Cstring, get_time_us()::Int, num_bufs_read::Int, num_overflows::Int, num_timeouts::Int)::Cint
+                    csv_log_callback !== nothing && csv_log_callback(csv_log_io, device, channels)
+                    @ccall fprintf(csv_log_io::Ptr{Cint}, "\n"::Cstring)::Cint
+                    @ccall fflush(csv_log_io::Ptr{Cint})::Cint
+                    last_csvoutput = get_time_us()
+                end
+            end
+
+            if timer_display
+                if get_time_us() - last_timeoutput > 1_000_000
+                    telemetry_callback !== nothing && telemetry_callback(device, channels)
+                    # some hackery to not allocate on the Julia GC so we use libc printf
+                    @ccall printf("Number of Buffers read: %ld Number of overflows: %ld Number of timeouts: %ld\n"::Cstring, num_bufs_read::Int, num_overflows::Int, num_timeouts::Int)::Cint
+                    @ccall _flushlbf()::Cvoid
+                    last_timeoutput = get_time_us()
+                end
+            end
         end
 
         wait(sdr_reader)
         wait(file_writer)
         #wait(logger)
-        #wait(pool_task)
+        wait(pool_task)
     finally
         SoapySDR.deactivate!(rxStream)
         for i in 1:num_channels
