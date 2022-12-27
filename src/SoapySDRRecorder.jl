@@ -116,7 +116,6 @@ function record(output::AbstractString;
     # we will keep track of the array pool size here
     array_pool_size = initial_buffers
 
-    GC.enable(false)
     # This task will make sure there is always a buffer available
     # for the SDR to read into
     @info "Spawning buffer pool task..."
@@ -128,6 +127,7 @@ function record(output::AbstractString;
             end
             array_pool_size += array_pool_size*(array_pool_growth_factor-1)
         end
+        GC.safepoint()
     end
 
     # Intialize file outputs
@@ -210,6 +210,7 @@ function record(output::AbstractString;
             put!(received_channel, buf)
             #allocations[1] += Base.gc_bytes() - temp_bytes
             #timers[1] += get_time_us() - temp_time
+            GC.safepoint()
         end
 
         @info "Spawning file writer..."
@@ -236,6 +237,7 @@ function record(output::AbstractString;
             put!(return_channel, buf)
             #allocations[2] += Base.gc_bytes() - temp_bytes
             #timers[2] += get_time_us() - temp_time
+            GC.safepoint()
         end
 
         while true
@@ -259,6 +261,7 @@ function record(output::AbstractString;
                     last_timeoutput = get_time_us()
                 end
             end
+            GC.safepoint()
         end
 
         wait(sdr_reader)
