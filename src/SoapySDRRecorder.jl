@@ -34,7 +34,8 @@ function record(output::AbstractString;
                 csv_log = true,
                 show_timer_stats = true,
                 stream_type::Type{T}=Complex{Int16},
-                initial_buffers=64) where T
+                initial_buffers::Integer=64,
+                array_pool_growth_factor::Integer=2) where T
 
     if Threads.nthreads() < 3
         error("This program requires at least 3 threads to run")
@@ -121,9 +122,11 @@ function record(output::AbstractString;
     @info "Spawning buffer pool task..."
     pool_task = Threads.@spawn while true
         if isempty(return_channel)
-            buf = [Vector{T}(undef, mtu) for _ in 1:num_channels]
-            put!(return_channel, buf)
-            array_pool_size += 1
+            for _ in 1:(array_pool_size*(array_pool_growth_factor-1))
+                buf = [Vector{T}(undef, mtu) for _ in 1:num_channels]
+                put!(return_channel, buf)
+            end
+            array_pool_size += array_pool_size*(array_pool_growth_factor-1)
         end
     end
 
