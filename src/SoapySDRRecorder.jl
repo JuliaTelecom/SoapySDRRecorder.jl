@@ -3,7 +3,7 @@ module SoapySDRRecorder
 using SoapySDR
 using Unitful
 using BufferedStreams
-using GZip
+using CodecZstd
 using Base.Threads
 
 gc_bytes() = Base.gc_bytes()
@@ -30,7 +30,7 @@ function record(output::AbstractString;
                 csv_header_callback::Union{Nothing, Function}=nothing,
                 timeout = nothing,
                 compress = false,
-                compression_level = 0,
+                compression_level = 3,
                 csv_log = true,
                 show_timer_stats = true,
                 stream_type::Type{T}=Complex{Int16},
@@ -100,7 +100,7 @@ function record(output::AbstractString;
     # open up the output file
     io = Ptr{Cint}[]
     csv_log_io = Ptr{Cint}(0)
-    compress_io = GZipStream[]
+    compress_io = ZstdCompressorStream[] # TODO type unstable
 
     # this channel is filled by reading off the SDR
     received_channel = Channel{Vector{Vector{T}}}(Inf)
@@ -142,7 +142,7 @@ function record(output::AbstractString;
             # convert fd to stdio, it is faster
             push!(io, @ccall fdopen(io_c::Cint, "w"::Cstring)::Ptr{Cint})
         else
-            push!(compress_io, GZip.open(output_base*".gz", "w"*string(compression_level)))
+            push!(compress_io, ZstdCompressorStream(open(output_base*".zstd", "w"), level=compression_level))
         end
     end
     if csv_log
@@ -224,7 +224,7 @@ function record(output::AbstractString;
                 # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
                 if compress
                     write(compress_io[i], sample)
-                    flush(compress_io[i])
+                    #flush(compress_io[i])
                 else
                     ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, mtu::Cint, io[i]::Ptr{Cint})::Csize_t
                     if ret < 0
