@@ -22,7 +22,7 @@ Record data from a SDR device..
 """
 function record(output::AbstractString;
                 timer_display = true,
-                device::Union{Nothing, SoapySDR.Device}=nothing, #XXX: Make this KWargs
+                device::Union{Nothing, SoapySDR.Device}=nothing,
                 channels::Union{Nothing, AbstractArray{<:SoapySDR.Channel}}=nothing,
                 channel_configuration::Union{Nothing, Function}=nothing,
                 telemetry_callback::Union{Nothing, Function}=nothing,
@@ -32,7 +32,6 @@ function record(output::AbstractString;
                 compress = false,
                 compression_level = 3,
                 csv_log = true,
-                show_timer_stats = true,
                 stream_type::Type{T}=Complex{Int16},
                 initial_buffers::Integer=64,
                 array_pool_growth_factor::Integer=2) where T
@@ -86,12 +85,6 @@ function record(output::AbstractString;
     # all sample rates should be the same
     @assert all(c -> c.sample_rate == first(channels).sample_rate, channels)
 
-    # Our bespoke TimerOutputs.jl implementation
-    timers = [0,0,0,0]
-    allocations = [0,0,0,0]
-    temp_bytes = 0
-    temp_time = 0
-
     # event counters and stats for stream reading
     num_bufs_read = 0
     num_timeouts = 0
@@ -142,7 +135,7 @@ function record(output::AbstractString;
             # convert fd to stdio, it is faster
             push!(io, @ccall fdopen(io_c::Cint, "w"::Cstring)::Ptr{Cint})
         else
-            push!(compress_io, ZstdCompressorStream(open(output_base*".zstd", "w"), level=compression_level))
+            push!(compress_io, ZstdCompressorStream(open(output_base*".zst", "w"), level=compression_level))
         end
     end
     if csv_log
@@ -163,9 +156,6 @@ function record(output::AbstractString;
     last_timeoutput = get_time_us()
     last_csvoutput = get_time_us()
 
-    have_slack = false
-    write_buf = true
-
     # Enable ther stream
     @info "streaming..."
     SoapySDR.activate!(rxStream)
@@ -173,8 +163,6 @@ function record(output::AbstractString;
         @info "Spawning reader task..."
         # SDR Reader Task
         sdr_reader = Threads.@spawn while true
-            #temp_bytes = Base.gc_bytes()
-            #temp_time = get_time_us()
             buf = take!(return_channel)
             # collect list of pointers to pass to SoapySDR
             nread, out_flags, timens = SoapySDR.SoapySDRDevice_readStream(
@@ -190,8 +178,6 @@ function record(output::AbstractString;
                 num_timeouts += 1
                 # put the buffer back into the queue
                 put!(return_channel, buf)
-                #allocations[1] += Base.gc_bytes() - temp_bytes
-                #timers[1] += get_time_us() - temp_time
                 continue
             elseif nread == SoapySDR.SOAPY_SDR_OVERFLOW
                 # just keep going and set to MTU
@@ -205,27 +191,20 @@ function record(output::AbstractString;
             else
                 num_bufs_read += 1
             end
-            #@info "read buffer"
-            # send the buffer to the file writer
             put!(received_channel, buf)
-            #allocations[1] += Base.gc_bytes() - temp_bytes
-            #timers[1] += get_time_us() - temp_time
             GC.safepoint()
         end
 
         @info "Spawning file writer..."
         # File Writer Task
         file_writer = Threads.@spawn while true
-            #temp_bytes = Base.gc_bytes()
-            #temp_time = get_time_us()
             buf = take!(received_channel)
-            #@info "writing buffer"
             for i in eachindex(buf)
                 sample = buf[i]
                 # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
                 if compress
                     write(compress_io[i], sample)
-                    #flush(compress_io[i])
+                    flush(compress_io[i])
                 else
                     ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, mtu::Cint, io[i]::Ptr{Cint})::Csize_t
                     if ret < 0
@@ -235,8 +214,6 @@ function record(output::AbstractString;
                 end
             end
             put!(return_channel, buf)
-            #allocations[2] += Base.gc_bytes() - temp_bytes
-            #timers[2] += get_time_us() - temp_time
             GC.safepoint()
         end
 
@@ -266,7 +243,6 @@ function record(output::AbstractString;
 
         wait(sdr_reader)
         wait(file_writer)
-        #wait(logger)
         wait(pool_task)
     finally
         SoapySDR.deactivate!(rxStream)
