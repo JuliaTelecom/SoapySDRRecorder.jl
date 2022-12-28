@@ -225,31 +225,25 @@ function record(output::AbstractString;
 
         while true
             if csv_log
-                if get_time_us() - last_csvoutput > 1_000_000
-                    # We will log some stats here, then let the callback add things.
-                    @ccall fprintf(csv_log_io::Ptr{Cint}, "%ld,%ld,%ld,%ld,"::Cstring, get_time_us()::Int, num_bufs_read[]::Int, num_overflows[]::Int, num_timeouts[]::Int)::Cint
-                    csv_log_callback !== nothing && csv_log_callback(csv_log_io, device, channels)
-                    @ccall fprintf(csv_log_io::Ptr{Cint}, "\n"::Cstring)::Cint
-                    @ccall fflush(csv_log_io::Ptr{Cint})::Cint
-                    last_csvoutput = get_time_us()
-                end
+                # We will log some stats here, then let the callback add things.
+                @ccall fprintf(csv_log_io::Ptr{Cint}, "%ld,%ld,%ld,%ld,"::Cstring, get_time_us()::Int, num_bufs_read[]::Int, num_overflows[]::Int, num_timeouts[]::Int)::Cint
+                csv_log_callback !== nothing && csv_log_callback(csv_log_io, device, channels)
+                @ccall fprintf(csv_log_io::Ptr{Cint}, "\n"::Cstring)::Cint
+                @ccall fflush(csv_log_io::Ptr{Cint})::Cint
             end
 
             if timer_display
-                if get_time_us() - last_timeoutput > 1_000_000
-                    telemetry_callback !== nothing && telemetry_callback(device, channels)
-                    # some hackery to not allocate on the Julia GC so we use libc printf
-                    @ccall printf("Number of Buffers read: %ld Number of overflows: %ld Number of timeouts: %ld Array pool size: %ld\n"::Cstring, num_bufs_read[]::Int, num_overflows[]::Int, num_timeouts[]::Int, array_pool_size::Int)::Cint
-                    @ccall _flushlbf()::Cvoid
-                    last_timeoutput = get_time_us()
-                end
+                telemetry_callback !== nothing && telemetry_callback(device, channels)
+                # some hackery to not allocate on the Julia GC so we use libc printf
+                @ccall printf("Number of Buffers read: %ld Number of overflows: %ld Number of timeouts: %ld Array pool size: %ld\n"::Cstring, num_bufs_read[]::Int, num_overflows[]::Int, num_timeouts[]::Int, array_pool_size::Int)::Cint
+                @ccall _flushlbf()::Cvoid
             end
+            sleep(1)
             istaskfailed(sdr_reader) && error("SDR Reader Task Failed")
             istaskfailed(file_writer) && error("File Writer Task Failed")
             istaskfailed(pool_task) && error("Array Pool Task Failed")
 
             # handle exit
-
             GC.safepoint()
         end
     finally
