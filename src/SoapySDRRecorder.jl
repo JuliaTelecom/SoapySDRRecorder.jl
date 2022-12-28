@@ -9,6 +9,43 @@ using Base.Threads
 gc_bytes() = Base.gc_bytes()
 get_time_us() = trunc(Int, time()*1_000_000) #microseconds is a reasonable measure
 
+
+function reader_task!(return_channel::Channel{T}, received_channel::Channel{T}, rxStream, mtu, timeout, num_timeouts, num_overflows, num_bufs_read) where T
+    pt = eltype(eltype(T))
+    ptrs = Vector{Ptr{pt}}(undef, rxStream.nchannels)
+    while true
+        buf = take!(return_channel)
+        # collect list of pointers to pass to SoapySDR
+        ret, out_flags, timens = SoapySDR.SoapySDRDevice_readStream(
+            rxStream.d,
+            rxStream,
+            pointer(map!(pointer, ptrs, buf)),
+            mtu,
+            timeout,
+        )
+        if ret == SoapySDR.SOAPY_SDR_TIMEOUT
+            #@ccall printf("T"::Cstring)::Cint
+            #@ccall _flushlbf()::Cvoid
+            num_timeouts[] += 1
+            # put the buffer back into the queue
+            put!(return_channel, buf)
+            continue
+        elseif ret == SoapySDR.SOAPY_SDR_OVERFLOW
+            # just keep going and set to MTU
+            #@ccall printf("O"::Cstring)::Cint
+            #@ccall _flushlbf()::Cvoid
+            num_overflows[] += 1
+            num_bufs_read[] += 1
+        elseif ret < 0
+            error("Error reading from stream: $(SoapySDR.SoapySDR_errToStr(ret))")
+        else
+            num_bufs_read[] += 1
+        end
+        put!(received_channel, buf)
+        GC.safepoint()
+    end
+end
+
 """
 record(output::AbstractString;
                 timer_display = true,
@@ -86,9 +123,9 @@ function record(output::AbstractString;
     @assert all(c -> c.sample_rate == first(channels).sample_rate, channels)
 
     # event counters and stats for stream reading
-    num_bufs_read = 0
-    num_timeouts = 0
-    num_overflows = 0
+    num_bufs_read = Ref(0)
+    num_timeouts = Ref(0)
+    num_overflows = Ref(0)
 
     # open up the output file
     io = Ptr{Cint}[]
@@ -107,14 +144,14 @@ function record(output::AbstractString;
     end
 
     # we will keep track of the array pool size here
-    array_pool_size = initial_buffers
+    array_pool_size = 0
 
     # This task will make sure there is always a buffer available
     # for the SDR to read into
     @info "Spawning buffer pool task..."
     pool_task = Threads.@spawn while true
         if isempty(return_channel)
-            for _ in 1:(array_pool_size*(array_pool_growth_factor-1))
+            for _ in 1:nw_allocs
                 buf = [Vector{T}(undef, mtu) for _ in 1:num_channels]
                 put!(return_channel, buf)
             end
@@ -147,7 +184,7 @@ function record(output::AbstractString;
         end
         # convert fd to stdio, it is faster
         csv_log_io = @ccall fdopen(csv_log_io::Cint, "w"::Cstring)::Ptr{Cint}
-        @ccall fprintf(csv_log_io::Ptr{Cint}, "time_us,num_bufs_read,num_overflows,num_timeouts,"::Cstring, get_time_us()::Int, num_bufs_read::Int, num_overflows::Int, num_timeouts::Int)::Cint
+        @ccall fprintf(csv_log_io::Ptr{Cint}, "time_us,num_bufs_read,num_overflows,num_timeouts,"::Cstring, get_time_us()::Int, num_bufs_read[]::Int, num_overflows[]::Int, num_timeouts[]::Int)::Cint
         csv_header_callback !== nothing && csv_header_callback(csv_log_io)
         @ccall fprintf(csv_log_io::Ptr{Cint}, "\n"::Cstring)::Cint
     end
@@ -162,38 +199,7 @@ function record(output::AbstractString;
     try
         @info "Spawning reader task..."
         # SDR Reader Task
-        sdr_reader = Threads.@spawn while true
-            buf = take!(return_channel)
-            # collect list of pointers to pass to SoapySDR
-            nread, out_flags, timens = SoapySDR.SoapySDRDevice_readStream(
-                rxStream.d,
-                rxStream,
-                pointer(map(pointer, buf)),
-                mtu,
-                timeout_estimate,
-            )
-            if nread == SoapySDR.SOAPY_SDR_TIMEOUT
-                #@ccall printf("T"::Cstring)::Cint
-                #@ccall _flushlbf()::Cvoid
-                num_timeouts += 1
-                # put the buffer back into the queue
-                put!(return_channel, buf)
-                continue
-            elseif nread == SoapySDR.SOAPY_SDR_OVERFLOW
-                # just keep going and set to MTU
-                #@ccall printf("O"::Cstring)::Cint
-                #@ccall _flushlbf()::Cvoid
-                #nread = mtu
-                num_overflows += 1
-                num_bufs_read += 1
-            elseif nread < 0
-                error("Error reading from stream: $(SoapySDR.SoapySDR_errToStr(nread))")
-            else
-                num_bufs_read += 1
-            end
-            put!(received_channel, buf)
-            GC.safepoint()
-        end
+        sdr_reader = Threads.@spawn reader_task!(return_channel, received_channel, rxStream, mtu, timeout_estimate, num_timeouts, num_overflows, num_bufs_read)
 
         @info "Spawning file writer..."
         # File Writer Task
@@ -221,7 +227,7 @@ function record(output::AbstractString;
             if csv_log
                 if get_time_us() - last_csvoutput > 1_000_000
                     # We will log some stats here, then let the callback add things.
-                    @ccall fprintf(csv_log_io::Ptr{Cint}, "%ld,%ld,%ld,%ld,"::Cstring, get_time_us()::Int, num_bufs_read::Int, num_overflows::Int, num_timeouts::Int)::Cint
+                    @ccall fprintf(csv_log_io::Ptr{Cint}, "%ld,%ld,%ld,%ld,"::Cstring, get_time_us()::Int, num_bufs_read[]::Int, num_overflows[]::Int, num_timeouts[]::Int)::Cint
                     csv_log_callback !== nothing && csv_log_callback(csv_log_io, device, channels)
                     @ccall fprintf(csv_log_io::Ptr{Cint}, "\n"::Cstring)::Cint
                     @ccall fflush(csv_log_io::Ptr{Cint})::Cint
@@ -233,17 +239,19 @@ function record(output::AbstractString;
                 if get_time_us() - last_timeoutput > 1_000_000
                     telemetry_callback !== nothing && telemetry_callback(device, channels)
                     # some hackery to not allocate on the Julia GC so we use libc printf
-                    @ccall printf("Number of Buffers read: %ld Number of overflows: %ld Number of timeouts: %ld Array pool size: %ld\n"::Cstring, num_bufs_read::Int, num_overflows::Int, num_timeouts::Int, array_pool_size::Int)::Cint
+                    @ccall printf("Number of Buffers read: %ld Number of overflows: %ld Number of timeouts: %ld Array pool size: %ld\n"::Cstring, num_bufs_read[]::Int, num_overflows[]::Int, num_timeouts[]::Int, array_pool_size::Int)::Cint
                     @ccall _flushlbf()::Cvoid
                     last_timeoutput = get_time_us()
                 end
             end
+            istaskfailed(sdr_reader) && error("SDR Reader Task Failed")
+            istaskfailed(file_writer) && error("File Writer Task Failed")
+            istaskfailed(pool_task) && error("Array Pool Task Failed")
+
+            # handle exit
+
             GC.safepoint()
         end
-
-        wait(sdr_reader)
-        wait(file_writer)
-        wait(pool_task)
     finally
         SoapySDR.deactivate!(rxStream)
         for i in 1:num_channels
