@@ -2,3 +2,4 @@
 SoapyRTLSDR_jll = "7bed6c1d-f2db-586c-9908-488058499e34"
 SoapySDR = "4fa426e6-03fd-45b2-b2dd-25f726820c03"
 SoapySDRRecorder = "963dc442-cee5-48d9-b294-055e8ed6afd4"
+Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
