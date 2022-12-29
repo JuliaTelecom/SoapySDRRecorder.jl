@@ -22,6 +22,6 @@ function telemetry_callback(dev, chans)
 end
 
 SoapySDRRecorder.record("test", device=Device(SoapySDR.Devices()[1]), channel_configuration=configuration,
-    telemetry_callback=telemetry_callback, compress=false, compression_level=5,
-    stream_type=Complex{Int8}) # timeout=100000)
+    telemetry_callback=telemetry_callback, compress=true, compression_level=5,
+    stream_type=Complex{Int8}, timeout=1000000)
 
