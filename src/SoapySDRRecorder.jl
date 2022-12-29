@@ -85,7 +85,6 @@ function record(output::AbstractString;
         if length(devices) == 0
             error("No devices found")
         else
-            @info "No device specified, selecting first device available"
             device = Device(devices[1])
         end
     else
@@ -150,7 +149,6 @@ function record(output::AbstractString;
 
     # This task will make sure there is always a buffer available
     # for the SDR to read into
-    @info "Spawning buffer pool task..."
     pool_task = Threads.@spawn while true
         if isempty(return_channel)
             for _ in 1:nw_allocs
@@ -192,14 +190,11 @@ function record(output::AbstractString;
     end
 
     # Enable ther stream
-    @info "streaming..."
     SoapySDR.activate!(rxStream)
     try
-        @info "Spawning reader task..."
         # SDR Reader Task
         sdr_reader = Threads.@spawn reader_task!(return_channel, received_channel, rxStream, mtu, timeout_estimate, num_timeouts, num_overflows, num_bufs_read)
 
-        @info "Spawning file writer..."
         # File Writer Task
         file_writer = Threads.@spawn while true
             buf = take!(received_channel)
