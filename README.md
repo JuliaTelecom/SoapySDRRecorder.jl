@@ -10,5 +10,4 @@ abstraction layer. It supports the following features:
 
 - Synchronized Multi-SDR recording
 - Throughput measurements
-- No allocation on the Julia GC while streaming
-- Streaming compression using GZip.jl
+- Streaming compression using CodecZstd.jl
