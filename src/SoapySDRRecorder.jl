@@ -16,10 +16,11 @@ function reader_task!(return_channel::Channel{T}, received_channel::Channel{T}, 
     while true
         buf = take!(return_channel)
         # collect list of pointers to pass to SoapySDR
+        map!(pointer, ptrs, buf)
         ret, out_flags, timens = SoapySDR.SoapySDRDevice_readStream(
             rxStream.d,
             rxStream,
-            pointer(map!(pointer, ptrs, buf)),
+            pointer(ptrs),
             mtu,
             timeout,
         )
@@ -71,6 +72,7 @@ function record(output::AbstractString;
                 csv_log = true,
                 stream_type::Type{T}=Complex{Int16},
                 initial_buffers::Integer=64,
+                flush_each_buf=true,
                 array_pool_growth_factor::Integer=2) where T
 
     if Threads.nthreads() < 3
@@ -83,7 +85,6 @@ function record(output::AbstractString;
         if length(devices) == 0
             error("No devices found")
         else
-            @info "No device specified, selecting first device available"
             device = Device(devices[1])
         end
     else
@@ -130,7 +131,7 @@ function record(output::AbstractString;
     # open up the output file
     io = Ptr{Cint}[]
     csv_log_io = Ptr{Cint}(0)
-    compress_io = ZstdCompressorStream[] # TODO type unstable
+    compress_io = ZstdCompressorStream{IOStream}[]
 
     # this channel is filled by reading off the SDR
     received_channel = Channel{Vector{Vector{T}}}(Inf)
@@ -148,7 +149,6 @@ function record(output::AbstractString;
 
     # This task will make sure there is always a buffer available
     # for the SDR to read into
-    @info "Spawning buffer pool task..."
     pool_task = Threads.@spawn while true
         if isempty(return_channel)
             for _ in 1:nw_allocs
@@ -189,19 +189,12 @@ function record(output::AbstractString;
         @ccall fprintf(csv_log_io::Ptr{Cint}, "\n"::Cstring)::Cint
     end
 
-    # output timings to console. Our austere TimerOutputs.jl
-    last_timeoutput = get_time_us()
-    last_csvoutput = get_time_us()
-
     # Enable ther stream
-    @info "streaming..."
     SoapySDR.activate!(rxStream)
     try
-        @info "Spawning reader task..."
         # SDR Reader Task
         sdr_reader = Threads.@spawn reader_task!(return_channel, received_channel, rxStream, mtu, timeout_estimate, num_timeouts, num_overflows, num_bufs_read)
 
-        @info "Spawning file writer..."
         # File Writer Task
         file_writer = Threads.@spawn while true
             buf = take!(received_channel)
@@ -210,13 +203,13 @@ function record(output::AbstractString;
                 # size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
                 if compress
                     write(compress_io[i], sample)
-                    flush(compress_io[i])
+                    flush_each_buf && flush(compress_io[i])
                 else
                     ret = @ccall fwrite(pointer(sample)::Ptr{T}, sizeof(T)::Csize_t, mtu::Cint, io[i]::Ptr{Cint})::Csize_t
                     if ret < 0
                         error("Error writing to file: $ret")
                     end
-                    @ccall fflush(io[i]::Ptr{Cint})::Cint
+                    flush_each_buf && @ccall fflush(io[i]::Ptr{Cint})::Cint
                 end
             end
             put!(return_channel, buf)
@@ -229,7 +222,6 @@ function record(output::AbstractString;
                 @ccall fprintf(csv_log_io::Ptr{Cint}, "%ld,%ld,%ld,%ld,"::Cstring, get_time_us()::Int, num_bufs_read[]::Int, num_overflows[]::Int, num_timeouts[]::Int)::Cint
                 csv_log_callback !== nothing && csv_log_callback(csv_log_io, device, channels)
                 @ccall fprintf(csv_log_io::Ptr{Cint}, "\n"::Cstring)::Cint
-                @ccall fflush(csv_log_io::Ptr{Cint})::Cint
             end
 
             if timer_display
