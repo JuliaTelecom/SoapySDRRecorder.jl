@@ -2,7 +2,6 @@ module SoapySDRRecorder
 
 using SoapySDR
 using Unitful
-using BufferedStreams
 using CodecZstd
 using Base.Threads
 
